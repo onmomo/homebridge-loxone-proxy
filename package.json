@@ -36,7 +36,6 @@
     "ffmpeg-for-homebridge": "^2.1.7",
     "lxcommunicator": "^1.1.1",
     "pick-port": "^2.1.0",
-    "sharp": "^0.34.2",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
