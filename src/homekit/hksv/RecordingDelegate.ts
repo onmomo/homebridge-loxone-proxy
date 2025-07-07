@@ -1,3 +1,4 @@
+// Updated RecordingDelegate.ts with adapted streaming args
 import {
   APIEvent,
   CameraRecordingConfiguration,
@@ -5,8 +6,6 @@ import {
   HAP,
   HDSProtocolSpecificErrorReason,
   RecordingPacket,
-  H264Level,
-  H264Profile,
 } from 'homebridge';
 import type { Logger } from 'homebridge';
 import { spawn, ChildProcess } from 'child_process';
@@ -167,7 +166,11 @@ export class RecordingDelegate implements CameraRecordingDelegate {
 
     const process = this.activeFFmpegProcesses.get(streamId);
     if (process && !process.killed) {
-      process.kill('SIGTERM');
+      setTimeout(() => {
+        if (!process.killed) {
+          process.kill('SIGTERM');
+        }
+      }, 250);
     }
     this.activeFFmpegProcesses.delete(streamId);
   }
@@ -176,12 +179,16 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     this.log.info(`Starting prebuffer for ${this.streamUrl}`);
     if (!this.preBuffer) {
       const ffmpegInput = [
-        '-f', 'mjpeg',
-        '-r', '10',
-        '-re',
-        '-fflags', '+genpts+discardcorrupt',
-        '-timeout', '5000000',
         '-headers', `Authorization: Basic ${this.base64auth}\r\n`,
+        '-use_wallclock_as_timestamps', '1',
+        '-probesize', '32',
+        '-analyzeduration', '0',
+        '-fflags', 'nobuffer',
+        '-flags', 'low_delay',
+        '-max_delay', '0',
+        '-re',
+        '-f', 'mjpeg',
+        '-r', '25',
         '-i', this.streamUrl,
       ];
       this.preBuffer = new PreBuffer(ffmpegInput, this.streamUrl, this.videoProcessor, this.log);
@@ -199,17 +206,17 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     const videoArgs = [
       '-vcodec', 'libx264',
       '-pix_fmt', 'yuv420p',
-      '-profile:v', config.videoCodec.parameters.profile === H264Profile.HIGH ? 'high' : 'main',
-      '-level:v', config.videoCodec.parameters.level === H264Level.LEVEL4_0 ? '4.0' : '3.1',
+      '-color_range', 'mpeg',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
-      '-b:v', '600k',
-      '-maxrate', '700k',
-      '-bufsize', '1400k',
-      '-g', '30',
-      '-keyint_min', '15',
+      '-crf', '22',
+      '-r', '25',
+      '-g', '25',
+      '-keyint_min', '25',
       '-sc_threshold', '0',
       '-force_key_frames', 'expr:gte(t,n_forced*1)',
+      '-filter:v', 'scale=\'min(1280,iw)\':\'min(720,ih)\':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-an',
     ];
 
     const session = await this.startFFMPegFragmetedMP4Session(this.videoProcessor, input, videoArgs);
