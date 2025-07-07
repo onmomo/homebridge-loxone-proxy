@@ -145,15 +145,11 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     try {
       await this.startPreBuffer();
       const fragmentGenerator = this.handleFragmentsRequests(this.currentRecordingConfiguration, streamId);
-      let fragmentCount = 0;
-      let totalBytes = 0;
       for await (const fragmentBuffer of fragmentGenerator) {
         if (abortController.signal.aborted) {
+          this.log.debug(`Aborted stream ${streamId}, skipping fragment`, this.streamUrl);
           break;
         }
-        fragmentCount++;
-        totalBytes += fragmentBuffer.length;
-        this.log.debug(`Fragment #${fragmentCount}, size: ${fragmentBuffer.length}, total: ${totalBytes}`, this.streamUrl);
         yield { data: fragmentBuffer, isLast: false };
       }
     } catch (error) {
@@ -182,7 +178,10 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       const ffmpegInput = [
         '-f', 'mjpeg',
         '-r', '10',
-        '-headers', `Authorization: Basic ${this.base64auth}\\r\\n`,
+        '-re',
+        '-fflags', '+genpts+discardcorrupt',
+        '-timeout', '5000000',
+        '-headers', `Authorization: Basic ${this.base64auth}\r\n`,
         '-i', this.streamUrl,
       ];
       this.preBuffer = new PreBuffer(ffmpegInput, this.streamUrl, this.videoProcessor, this.log);
@@ -257,10 +256,14 @@ export class RecordingDelegate implements CameraRecordingDelegate {
 
     const cp = spawn(ffmpegPath, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
 
+    cp.on('exit', (code, signal) => {
+      this.log.error(`[FFmpeg] exited with code ${code}, signal ${signal}`);
+    });
+
     if (cp.stderr) {
       cp.stderr.on('data', data => {
         const msg = data.toString();
-        if (msg.includes('moov') || msg.includes('error')) {
+        if (msg.includes('moov') || msg.toLowerCase().includes('error')) {
           this.log.warn(`[FFmpeg stderr]: ${msg.trim()}`);
         }
       });

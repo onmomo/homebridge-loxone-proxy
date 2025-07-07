@@ -16,9 +16,6 @@ export interface Mp4Session {
 
 const defaultPrebufferDuration = 15000;
 
-/**
- * Class representing a pre-buffer for video streaming.
- */
 export class PreBuffer {
   prebufferFmp4: PrebufferFmp4[] = [];
   events = new EventEmitter();
@@ -34,13 +31,6 @@ export class PreBuffer {
   private readonly cameraName: string;
   private readonly ffmpegPath: string;
 
-  /**
-   * Creates an instance of `PreBuffer`.
-   * @param ffmpegInput - The input command for FFmpeg as array.
-   * @param cameraName - The name of the camera.
-   * @param videoProcessor - The video processing command (e.g., 'ffmpeg').
-   * @param log - Logger instance.
-   */
   constructor(ffmpegInput: string[], cameraName: string, videoProcessor: string, log: Logger) {
     this.ffmpegInput = ffmpegInput;
     this.cameraName = cameraName;
@@ -48,10 +38,6 @@ export class PreBuffer {
     this.log = log;
   }
 
-  /**
-   * Starts the pre-buffer process.
-   * @returns A promise that resolves to the pre-buffer session object.
-   */
   async startPreBuffer(): Promise<Mp4Session> {
     if (this.prebufferSession) {
       return this.prebufferSession;
@@ -85,7 +71,6 @@ export class PreBuffer {
           this.prebufferFmp4.push({ atom, time: now });
         }
 
-        // Purge stale frames
         while (this.prebufferFmp4.length && this.prebufferFmp4[0].time < now - defaultPrebufferDuration) {
           this.prebufferFmp4.shift();
         }
@@ -113,6 +98,10 @@ export class PreBuffer {
       stdio: stdioValue,
     });
 
+    cp.on('exit', (code, signal) => {
+      this.log.error(`[PreBuffer] FFmpeg exited with code ${code}, signal ${signal}`, this.cameraName);
+    });
+
     if (cp.stderr) {
       cp.stderr.on('data', data => {
         const output = data.toString();
@@ -126,13 +115,7 @@ export class PreBuffer {
     return this.prebufferSession;
   }
 
-  /**
-   * Retrieves the video data from the pre-buffer.
-   * @param requestedPrebuffer - The duration of pre-buffering to retrieve in milliseconds.
-   * @returns A promise that resolves to an array of FFmpeg input commands for retrieving the pre-buffered video.
-   */
   async getVideo(requestedPrebuffer: number): Promise<string[]> {
-    // Wait max 7s for moov atom to appear
     const waitUntil = Date.now() + 7000;
     while (!this.moov && Date.now() < waitUntil) {
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -182,7 +165,7 @@ export class PreBuffer {
       socket.once('error', cleanup);
     });
 
-    setTimeout(() => server.close(), 30000); // safety timeout
+    setTimeout(() => server.close(), 30000);
     const port = await listenServer(server, this.log);
 
     return ['-f', 'mp4', '-i', `tcp://127.0.0.1:${port}`];
