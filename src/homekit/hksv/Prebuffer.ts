@@ -79,7 +79,23 @@ export class PreBuffer {
 
       for await (const atom of parser) {
         const now = Date.now();
-        this.handleAtom(atom, now);
+        if (!this.ftyp) {
+          this.ftyp = atom;
+        } else if (!this.moov) {
+          this.moov = atom;
+        } else {
+          if (atom.type === 'mdat') {
+            if (this.prevIdr) {
+              this.idrInterval = now - this.prevIdr;
+            }
+            this.prevIdr = now;
+          }
+          this.prebufferFmp4.push({ atom, time: now });
+        }
+
+        while (this.prebufferFmp4.length && this.prebufferFmp4[0].time < now - defaultPrebufferDuration) {
+          this.prebufferFmp4.shift();
+        }
         this.events.emit('atom', atom);
       }
     });

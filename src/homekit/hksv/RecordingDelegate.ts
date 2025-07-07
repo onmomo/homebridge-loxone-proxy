@@ -204,9 +204,9 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     this.streamAbortControllers.get(streamId)?.abort();
     this.streamAbortControllers.delete(streamId);
 
-    const proc = this.activeFFmpegProcesses.get(streamId);
-    if (proc && !proc.killed) {
-      proc.kill('SIGTERM');
+    const process = this.activeFFmpegProcesses.get(streamId);
+    if (process && !process.killed) {
+      process.kill('SIGTERM');
     }
     this.activeFFmpegProcesses.delete(streamId);
   }
