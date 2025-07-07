@@ -14,51 +14,30 @@ export interface Mp4Session {
   process: ChildProcess;
 }
 
-// Reasonable upper bound to avoid memory abuse
-const MAX_FRAGMENTS = 300;
+const defaultPrebufferDuration = 15000;
 
-/**
- * PreBuffer captures a sliding window of fragmented MP4 atoms
- * from an FFmpeg-transcoded live stream. This buffer is used to
- * deliver pre-recorded video to consumers such as HomeKit Secure Video.
- */
 export class PreBuffer {
-  private prebufferFmp4: PrebufferFmp4[] = [];
-  private events = new EventEmitter();
-  private prebufferSession?: Mp4Session;
+  prebufferFmp4: PrebufferFmp4[] = [];
+  events = new EventEmitter();
+  released = false;
+  ftyp?: MP4Atom;
+  moov?: MP4Atom;
+  idrInterval = 0;
+  prevIdr = 0;
+  prebufferSession?: Mp4Session;
 
   private readonly log: Logger;
   private readonly ffmpegInput: string[];
   private readonly cameraName: string;
   private readonly ffmpegPath: string;
-  private readonly prebufferDuration: number;
 
-  /**
-   * Constructs a new PreBuffer instance.
-   * @param ffmpegInput - FFmpeg input arguments (e.g., source URL and headers)
-   * @param cameraName - Identifier for logging/debugging
-   * @param videoProcessor - Path to ffmpeg binary
-   * @param log - Logger instance from the platform
-   * @param prebufferDurationMs - Optional max time in milliseconds to buffer (default 15000)
-   */
-  constructor(
-    ffmpegInput: string[],
-    cameraName: string,
-    videoProcessor: string,
-    log: Logger,
-    prebufferDurationMs = 15000,
-  ) {
+  constructor(ffmpegInput: string[], cameraName: string, videoProcessor: string, log: Logger) {
     this.ffmpegInput = ffmpegInput;
     this.cameraName = cameraName;
     this.ffmpegPath = videoProcessor;
     this.log = log;
-    this.prebufferDuration = prebufferDurationMs;
   }
 
-  /**
-   * Launches FFmpeg and a TCP server to receive fragmented MP4 data.
-   * Fragments are stored in memory and emitted as 'atom' events.
-   */
   async startPreBuffer(): Promise<Mp4Session> {
     if (this.prebufferSession) {
       return this.prebufferSession;
@@ -66,17 +45,23 @@ export class PreBuffer {
 
     const vcodec = [
       '-vcodec', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      '-color_range', 'mpeg',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
-      '-pix_fmt', 'yuv420p',
-      '-r', '10',
+      '-crf', '22',
+      '-r', '25',
+      '-g', '25',
+      '-keyint_min', '25',
+      '-sc_threshold', '0',
+      '-force_key_frames', 'expr:gte(t,n_forced*1)',
+      '-filter:v', 'scale=\'min(1280,iw)\':\'min(720,ih)\':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2',
       '-an',
     ];
 
     const fmp4OutputServer: Server = createServer(async (socket) => {
-      fmp4OutputServer.close(); // Accept one connection only
+      fmp4OutputServer.close();
       const parser = parseFragmentedMP4(socket);
-
       for await (const atom of parser) {
         const now = Date.now();
         if (!this.ftyp) {
@@ -96,6 +81,7 @@ export class PreBuffer {
         while (this.prebufferFmp4.length && this.prebufferFmp4[0].time < now - defaultPrebufferDuration) {
           this.prebufferFmp4.shift();
         }
+
         this.events.emit('atom', atom);
       }
     });
@@ -137,67 +123,57 @@ export class PreBuffer {
     return this.prebufferSession;
   }
 
-  /**
-   * Adds an atom to the buffer and evicts older ones beyond time or count limits.
-   */
-  private handleAtom(atom: MP4Atom, timestamp: number): void {
-    this.prebufferFmp4.push({ atom, time: timestamp });
-
-    // Evict by age
-    const minTime = timestamp - this.prebufferDuration;
-    while (this.prebufferFmp4.length && this.prebufferFmp4[0].time < minTime) {
-      this.prebufferFmp4.shift();
-    }
-
-    // Evict by count
-    while (this.prebufferFmp4.length > MAX_FRAGMENTS) {
-      this.prebufferFmp4.shift();
-    }
-
-    this.log.debug(`[PreBuffer] Stored atom: ${atom.type}, buffer size: ${this.prebufferFmp4.length}`);
-  }
-
-  /**
-   * Provides a TCP input stream to be read by a consumer such as FFmpeg.
-   * The stream starts with the current buffered atoms and continues with live atoms.
-   * @param requestedPrebuffer - Number of milliseconds of past fragments to include
-   * @returns An array of FFmpeg arguments to read the stream
-   */
   async getVideo(requestedPrebuffer: number): Promise<string[]> {
+    const waitUntil = Date.now() + 7000;
+    while (!this.moov && Date.now() < waitUntil) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (!this.moov) {
+      this.log.error(`[PreBuffer] Timeout: moov atom not available for camera ${this.cameraName}`);
+      throw new Error('moov atom not yet available');
+    }
+
     const server = new Server(socket => {
       server.close();
+      const writeAtom = (atom: MP4Atom) => socket.write(Buffer.concat([atom.header, atom.data]));
 
-      const now = Date.now();
-      let count = 0;
-
-      for (const fragment of this.prebufferFmp4) {
-        if (fragment.time >= now - requestedPrebuffer) {
-          socket.write(Buffer.concat([fragment.atom.header, fragment.atom.data]));
-          count++;
-        }
+      if (this.ftyp) {
+        writeAtom(this.ftyp);
+      }
+      if (this.moov) {
+        writeAtom(this.moov);
       }
 
-      this.log.debug(`[PreBuffer] Sent ${count} buffered atoms to consumer`);
+      const now = Date.now();
+      let needMoof = true;
 
-      const onNewAtom = (atom: MP4Atom) => {
-        socket.write(Buffer.concat([atom.header, atom.data]));
-      };
+      for (const prebuffer of this.prebufferFmp4) {
+        if (prebuffer.time < now - requestedPrebuffer) {
+          continue;
+        }
+        if (needMoof && prebuffer.atom.type !== 'moof') {
+          continue;
+        }
+        needMoof = false;
+        writeAtom(prebuffer.atom);
+      }
 
-      this.events.on('atom', onNewAtom);
+      this.events.on('atom', writeAtom);
 
       const cleanup = () => {
-        this.events.removeListener('atom', onNewAtom);
+        this.events.removeListener('atom', writeAtom);
+        this.events.removeListener('killed', cleanup);
         socket.removeAllListeners();
         socket.destroy();
       };
 
+      this.events.once('killed', cleanup);
       socket.once('end', cleanup);
       socket.once('close', cleanup);
       socket.once('error', cleanup);
-      this.events.once('killed', cleanup);
     });
 
-    setTimeout(() => server.close(), 30000); // Safety timeout
+    setTimeout(() => server.close(), 30000);
     const port = await listenServer(server, this.log);
 
     return ['-f', 'mp4', '-i', `tcp://127.0.0.1:${port}`];
