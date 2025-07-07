@@ -36,10 +36,12 @@
     "ffmpeg-for-homebridge": "^2.1.7",
     "lxcommunicator": "^1.1.1",
     "pick-port": "^2.1.0",
+    "sharp": "^0.34.2",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
     "@types/node": "^16.18.126",
+    "@types/sharp": "^0.32.0",
     "@typescript-eslint/eslint-plugin": "^5.0.0",
     "@typescript-eslint/parser": "^5.0.0",
     "eslint": "^8.0.1",

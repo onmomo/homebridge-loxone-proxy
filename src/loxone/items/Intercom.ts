@@ -5,58 +5,70 @@ import { CameraService } from '../../homekit/services/Camera';
 import { CameraMotionSensor } from '../../homekit/services/CameraMotionSensor';
 
 /**
- * Loxone Intercom (V1) Item
-*/
+ * Represents a Loxone Intercom accessory with optional camera integration.
+ * Supports doorbell events, child switch controls, and motion detection via MJPEG analysis.
+ */
 export class Intercom extends LoxoneAccessory {
 
   protected camera?: CameraService;
 
+  /**
+   * Configures services including doorbell, camera (if present),
+   * and additional sub-controls (e.g., door open button).
+   */
   configureServices(): void {
-
     this.ItemStates = {
-      [this.device.states.bell]: { 'service': 'PrimaryService', 'state': 'bell' },
+      [this.device.states.bell]: { service: 'PrimaryService', state: 'bell' },
     };
 
-    // Loxone Camera Present??
-    this.configureCamera();
-
-    // Register pushbuttons on the intercom
-    this.registerChildItems();
+    this.configureCamera();      // Setup camera if present
+    this.registerChildItems();   // Setup additional switches (e.g. unlock button)
 
     this.Service.PrimaryService = new Doorbell(this.platform, this.Accessory!);
   }
 
+  /**
+   * Detects and configures the camera associated with the intercom.
+   * Supports both custom IP-based streams and Loxone-native formats.
+   */
   protected async configureCamera(): Promise<void> {
     const parsedData = await this.platform.LoxoneHandler.getsecuredDetails(this.device.uuidAction);
     const videoInfo = parsedData?.LL?.value ? JSON.parse(parsedData.LL.value)?.videoInfo : undefined;
-    let streamUrl = 'undefined';
 
-    if (videoInfo === undefined) { // Intercom without Camera
-      this.platform.log.debug(`[${this.device.name}] Loxone Intercom without Camera`);
+    if (!videoInfo) {
+      this.platform.log.debug(`[${this.device.name}] No camera info found: Intercom without video`);
       return;
     }
 
-    if (this.device.details.deviceType === 0) { // Custom Intercom
+    let streamUrl = 'undefined';
+
+    // Device type 0 indicates a custom camera configuration
+    if (this.device.details.deviceType === 0) {
       streamUrl = videoInfo.streamUrl;
-    } else if (videoInfo.alertImage) { // Loxone V1/XL Intercom
-      const ipAddressMatch = videoInfo.alertImage.match(/\/\/([^/]+)/);
-      const ipAddress = ipAddressMatch ? ipAddressMatch[1] : undefined;
+
+    // Device has alertImage URL (Loxone native V1/XL intercom)
+    } else if (videoInfo.alertImage) {
+      const ipMatch = videoInfo.alertImage.match(/\/\/([^/]+)/);
+      const ipAddress = ipMatch?.[1];
 
       if (ipAddress) {
         streamUrl = `http://${ipAddress}/mjpg/video.mjpg`;
       }
     }
 
-    // Basic Authentication
+    // Basic authentication for camera access
     const base64auth = Buffer.from(`${videoInfo.user}:${videoInfo.pass}`, 'utf8').toString('base64');
 
     this.setupCamera(streamUrl, base64auth);
   }
 
+  /**
+   * Initializes the CameraService and attaches a motion sensor.
+   * Motion is detected via snapshot-based MJPEG size variation.
+   */
   protected setupCamera(streamUrl: string, base64auth: string): void {
     this.camera = new CameraService(this.platform, this.Accessory!, streamUrl, base64auth);
 
-    // Built-in Motion Sensor Based on MJPEG Frame Size Variations
     this.Service['CameraMotion'] = new CameraMotionSensor(
       this.platform,
       this.Accessory!,
@@ -64,14 +76,20 @@ export class Intercom extends LoxoneAccessory {
     );
   }
 
+  /**
+   * Registers any sub-controls under the intercom (e.g., pushbuttons).
+   * Each becomes an individual HomeKit switch service.
+   */
   private registerChildItems(): void {
     for (const childUuid in this.device.subControls) {
-      const ChildItem = this.device.subControls[childUuid];
-      const serviceName = ChildItem.name.replace(/\s/g, ''); // Removes all spaces
-      for (const stateName in ChildItem.states) {
-        const stateUUID = ChildItem.states[stateName];
+      const child = this.device.subControls[childUuid];
+      const serviceName = child.name.replace(/\s/g, '');
+
+      for (const stateName in child.states) {
+        const stateUUID = child.states[stateName];
         this.ItemStates[stateUUID] = { service: serviceName, state: stateName };
-        this.Service[serviceName] = new Switch(this.platform, this.Accessory!, ChildItem);
+
+        this.Service[serviceName] = new Switch(this.platform, this.Accessory!, child);
       }
     }
   }

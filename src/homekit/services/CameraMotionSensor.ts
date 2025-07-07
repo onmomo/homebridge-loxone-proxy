@@ -2,118 +2,150 @@ import { PlatformAccessory } from 'homebridge';
 import { LoxonePlatform } from '../../LoxonePlatform';
 import { BaseService } from './BaseService';
 import { CameraService } from './Camera';
+import sharp from 'sharp';
 
 /**
- * CameraMotionSensor uses periodic snapshot analysis to detect motion
- * by monitoring changes in image size over time.
+ * CameraMotionSensor performs pixel-diff motion detection using sharp,
+ * and skips polling during active HKSV recording sessions.
  */
 export class CameraMotionSensor extends BaseService {
-  // Snapshot polling interval in milliseconds
-  private readonly intervalMs = 1000;
+  private readonly pollIntervalMs = 1000;
+  private readonly failureBackoffMs = 5000;
+  private readonly pixelDiffThreshold = 0.04;
+  private readonly fallbackSizeDeltaMin = 0.04;
+  private readonly fallbackSizeDeltaMax = 0.30;
+  private readonly cooldownMs = 8000;
+  private readonly resetDelayMs = 15000;
 
-  // Relative size change thresholds to detect motion
-  private readonly minThreshold = 0.04;
-  private readonly maxThreshold = 0.30;
+  private state = { MotionDetected: false };
 
-  // Minimum time between motion triggers (to avoid false positives)
-  private readonly cooldown = 8000;
-
-  // How long to wait after last detected motion before clearing the state
-  private readonly resetTimeout = 15000;
-
+  private lastSnapshotBuffer?: Buffer;
   private lastSnapshotSize?: number;
-  private lastTrigger = 0;
-  private active = false;
-
-  private state = {
-    MotionDetected: false,
-  };
-
-  private camera: CameraService;
+  private lastTriggerTime = 0;
+  private consecutiveFailures = 0;
+  private polling = false;
 
   constructor(
-    platform: LoxonePlatform,
-    accessory: PlatformAccessory,
-    camera: CameraService,
+    readonly platform: LoxonePlatform,
+    readonly accessory: PlatformAccessory,
+    readonly camera: CameraService,
   ) {
     super(platform, accessory);
-    this.camera = camera;
     this.setupService();
-    this.startDetection();
+    this.startPolling();
   }
 
-  /**
-   * Initializes the HomeKit MotionSensor service
-   * and binds the characteristic to internal state.
-   */
   setupService(): void {
     this.service = this.accessory.getService(this.platform.Service.MotionSensor)
-      || this.accessory.addService(this.platform.Service.MotionSensor);
+      ?? this.accessory.addService(this.platform.Service.MotionSensor);
 
     this.service.getCharacteristic(this.platform.Characteristic.MotionDetected)
       .onGet(() => this.state.MotionDetected);
   }
 
-  /**
-   * Begins periodic snapshot analysis to detect motion.
-   * Compares image size deltas between snapshots to infer activity.
-   */
-  private startDetection() {
-    this.platform.log.debug(`[${this.accessory.displayName}] Starting camera motion detection`);
-    this.active = true;
+  private startPolling(): void {
+    this.platform.log.debug(`[${this.accessory.displayName}] Starting sharp-based motion detection`);
+    this.polling = true;
+    this.schedulePoll(this.pollIntervalMs);
+  }
 
-    setInterval(async () => {
-      if (!this.active) return;
+  private schedulePoll(delay: number): void {
+    setTimeout(() => this.poll(), delay);
+  }
 
-      const snapshot = await this.camera.getSnapshot();
-      if (!snapshot) {
-        this.platform.log.warn(`[${this.accessory.displayName}] Snapshot unavailable`);
-        return;
-      }
+  private async poll(): Promise<void> {
+    if (!this.polling) {
+      return;
+    }
 
-      const currentSize = snapshot.length;
-      const now = Date.now();
+    // Skip motion detection if HKSV is currently recording
+    if (this.camera.isHKSVActive?.()) {
+      this.platform.log.debug(`[${this.accessory.displayName}] Skipping motion detection (HKSV active)`);
+      this.schedulePoll(this.pollIntervalMs);
+      return;
+    }
 
-      if (this.lastSnapshotSize) {
-        const delta = Math.abs(currentSize - this.lastSnapshotSize) / this.lastSnapshotSize;
+    const snapshot = await this.camera.getSnapshot();
 
-        if (
-          delta > this.minThreshold &&
-          delta < this.maxThreshold &&
-          now - this.lastTrigger > this.cooldown
-        ) {
+    if (!snapshot) {
+      this.consecutiveFailures++;
+      this.platform.log.warn(`[${this.accessory.displayName}] Snapshot unavailable`);
+      this.schedulePoll(this.failureBackoffMs);
+      return;
+    }
+
+    const now = Date.now();
+
+    try {
+      if (this.lastSnapshotBuffer) {
+        const [prev, curr] = await Promise.all([
+          sharp(this.lastSnapshotBuffer).resize(160, 90).greyscale().raw().toBuffer(),
+          sharp(snapshot).resize(160, 90).greyscale().raw().toBuffer(),
+        ]);
+
+        const diffPixels = this.countPixelDiff(prev, curr);
+        const totalPixels = prev.length;
+        const diffRatio = diffPixels / totalPixels;
+
+        if (diffRatio > this.pixelDiffThreshold && now - this.lastTriggerTime > this.cooldownMs) {
           this.triggerMotion(now);
         } else if (
           this.state.MotionDetected &&
-          now - this.lastTrigger > this.resetTimeout
+          now - this.lastTriggerTime > this.resetDelayMs
         ) {
           this.resetMotion();
         }
       }
-
-      this.lastSnapshotSize = currentSize;
-    }, this.intervalMs);
-  }
-
-  /**
-   * Handles setting the motion state to true when motion is detected.
-   */
-  private triggerMotion(now: number) {
-    if (!this.state.MotionDetected) {
-      this.platform.log.info(`[${this.accessory.displayName}] 📸 Motion detected via snapshot`);
-      this.state.MotionDetected = true;
-      this.service?.updateCharacteristic(this.platform.Characteristic.MotionDetected, true);
+    } catch (err) {
+      // fallback to snapshot size delta
+      const size = snapshot.length;
+      if (this.lastSnapshotSize) {
+        const delta = Math.abs(size - this.lastSnapshotSize) / this.lastSnapshotSize;
+        if (
+          delta > this.fallbackSizeDeltaMin &&
+          delta < this.fallbackSizeDeltaMax &&
+          now - this.lastTriggerTime > this.cooldownMs
+        ) {
+          this.platform.log.warn(`[${this.accessory.displayName}] ⚠️ Using fallback motion detection`);
+          this.triggerMotion(now);
+        } else if (
+          this.state.MotionDetected &&
+          now - this.lastTriggerTime > this.resetDelayMs
+        ) {
+          this.resetMotion();
+        }
+      }
+      this.lastSnapshotSize = size;
     }
 
-    this.lastTrigger = now;
+    this.lastSnapshotBuffer = snapshot;
+    this.schedulePoll(this.pollIntervalMs);
   }
 
-  /**
-   * Resets the motion state to false after a quiet period.
-   */
-  private resetMotion() {
+  private countPixelDiff(buf1: Buffer, buf2: Buffer): number {
+    let diff = 0;
+    for (let i = 0; i < buf1.length; i++) {
+      if (Math.abs(buf1[i] - buf2[i]) > 15) {
+        diff++;
+      } // Pixel intensity threshold
+    }
+    return diff;
+  }
+
+  private triggerMotion(now: number): void {
+    this.platform.log.info(`[${this.accessory.displayName}] 📸 Motion detected`);
+    this.state.MotionDetected = true;
+    this.lastTriggerTime = now;
+    this.service?.updateCharacteristic(this.platform.Characteristic.MotionDetected, true);
+  }
+
+  private resetMotion(): void {
     this.platform.log.info(`[${this.accessory.displayName}] ⏸️ Motion ended`);
     this.state.MotionDetected = false;
     this.service?.updateCharacteristic(this.platform.Characteristic.MotionDetected, false);
+  }
+
+  public stop(): void {
+    this.polling = false;
   }
 }

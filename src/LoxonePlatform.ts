@@ -118,7 +118,8 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
           new itemFile[constructorName](this, item);
         }
       } catch (error) {
-        this.log.debug(`[mapLoxoneItem] Skipping Unsupported ItemType: ${item.name} with type ${item.type}`);
+        this.log.debug(error instanceof Error ? error.message : String(error));
+        this.log.info(`[mapLoxoneItem] Skipping Unsupported ItemType: ${item.name} with type ${item.type}`);
       }
     }
   }

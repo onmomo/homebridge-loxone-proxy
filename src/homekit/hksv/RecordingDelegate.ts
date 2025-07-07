@@ -1,4 +1,3 @@
-// Updated RecordingDelegate.ts with adapted streaming args
 import {
   APIEvent,
   CameraRecordingConfiguration,
@@ -6,14 +5,16 @@ import {
   HAP,
   HDSProtocolSpecificErrorReason,
   RecordingPacket,
+  H264Level,
+  H264Profile,
 } from 'homebridge';
 import type { Logger } from 'homebridge';
 import { spawn, ChildProcess } from 'child_process';
-import { Server, AddressInfo } from 'net';
 import { Readable } from 'stream';
 import { once } from 'events';
 import { Buffer } from 'buffer';
 import { env } from 'process';
+import { Server, AddressInfo } from 'net';
 import { LoxonePlatform } from '../../LoxonePlatform';
 import { PreBuffer, Mp4Session } from './Prebuffer';
 
@@ -29,44 +30,59 @@ export interface FFMpegFragmentedMP4Session {
   cp: ChildProcess;
 }
 
-export const PREBUFFER_LENGTH = 4000;
+export interface RecordingDelegateOptions {
+  platform: LoxonePlatform;
+  streamUrl: string;
+  base64auth: string;
+}
 
+export const PREBUFFER_LENGTH = 4000;
+const GOP_FPS = 30;
+const GOP_SECONDS = 1;
+const GOP_SIZE = GOP_FPS * GOP_SECONDS;
+
+/**
+ * Binds a TCP server to a random port and waits for it to listen.
+ */
 export async function listenServer(server: Server, log: Logger): Promise<number> {
-  let isListening = false;
-  while (!isListening) {
-    const port = 10000 + Math.round(Math.random() * 30000);
+  let listening = false;
+  while (!listening) {
+    const port = 10000 + Math.floor(Math.random() * 30000);
     server.listen(port);
     try {
       await once(server, 'listening');
-      const address = server.address() as AddressInfo;
-      isListening = true;
-      return address.port;
-    } catch (e: unknown) {
-      log.error('Error while listening to the server:', e);
+      listening = true;
+      return (server.address() as AddressInfo).port;
+    } catch (e) {
+      log.error('Error while listening to server:', e);
     }
   }
-  return 0;
+  throw new Error('Failed to bind server to a port');
 }
 
+/**
+ * Reads exactly `length` bytes from a readable stream or throws on premature end.
+ */
 export async function readLength(readable: Readable, length: number): Promise<Buffer> {
   if (!length) {
     return Buffer.alloc(0);
   }
-  const ret = readable.read(length);
-  if (ret) {
-    return ret;
+  const existing = readable.read(length);
+  if (existing) {
+    return existing;
   }
+
   return new Promise((resolve, reject) => {
     const r = () => {
-      const data = readable.read(length);
-      if (data) {
+      const chunk = readable.read(length);
+      if (chunk) {
         cleanup();
-        resolve(data);
+        resolve(chunk);
       }
     };
     const e = () => {
       cleanup();
-      reject(new Error(`stream ended during read for minimum ${length} bytes`));
+      reject(new Error(`stream ended before ${length} bytes`));
     };
     const cleanup = () => {
       readable.removeListener('readable', r);
@@ -77,9 +93,17 @@ export async function readLength(readable: Readable, length: number): Promise<Bu
   });
 }
 
+/**
+ * MP4 fragment parser from raw ffmpeg pipe.
+ */
 export async function* parseFragmentedMP4(readable: Readable): AsyncGenerator<MP4Atom> {
   while (true) {
-    const header = await readLength(readable, 8);
+    let header: Buffer;
+    try {
+      header = await readLength(readable, 8);
+    } catch (err) {
+      break;
+    }
     const length = header.readInt32BE(0) - 8;
     const type = header.slice(4).toString();
     const data = await readLength(readable, length);
@@ -87,6 +111,9 @@ export async function* parseFragmentedMP4(readable: Readable): AsyncGenerator<MP
   }
 }
 
+/**
+ * Handles HomeKit Secure Video recording session lifecycle.
+ */
 export class RecordingDelegate implements CameraRecordingDelegate {
   private readonly hap: HAP;
   private readonly log: Logger;
@@ -100,11 +127,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   private activeFFmpegProcesses = new Map<number, ChildProcess>();
   private streamAbortControllers = new Map<number, AbortController>();
 
-  constructor(
-    private readonly platform: LoxonePlatform,
-    streamUrl: string,
-    base64auth: string,
-  ) {
+  constructor({ platform, streamUrl, base64auth }: RecordingDelegateOptions) {
     this.log = platform.log;
     this.hap = platform.api.hap;
     this.videoProcessor = 'ffmpeg';
@@ -120,8 +143,12 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     });
   }
 
+  public isActive(): boolean {
+    return this.streamAbortControllers.size > 0;
+  }
+
   updateRecordingActive(active: boolean): Promise<void> {
-    this.log.info(`Recording active status changed to: ${active}`, this.streamUrl);
+    this.log.info(`Recording active: ${active}`, this.streamUrl);
     return Promise.resolve();
   }
 
@@ -131,10 +158,14 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     return Promise.resolve();
   }
 
+  /**
+   * Handles incoming HomeKit recording request.
+   */
   async *handleRecordingStreamRequest(streamId: number): AsyncGenerator<RecordingPacket> {
-    this.log.info(`Recording stream request received for stream ID: ${streamId}`, this.streamUrl);
-    if (!this.currentRecordingConfiguration) {
-      this.log.error('No recording configuration available', this.streamUrl);
+    this.log.info(`Recording stream request ID: ${streamId}`, this.streamUrl);
+    const config = this.currentRecordingConfiguration;
+    if (!config) {
+      this.log.error('Missing recording config', this.streamUrl);
       return;
     }
 
@@ -143,38 +174,46 @@ export class RecordingDelegate implements CameraRecordingDelegate {
 
     try {
       await this.startPreBuffer();
-      const fragmentGenerator = this.handleFragmentsRequests(this.currentRecordingConfiguration, streamId);
-      for await (const fragmentBuffer of fragmentGenerator) {
+      const { cp, generator } = await this.launchFragmentSession(config, streamId);
+      let count = 0;
+      for await (const fragment of this.consumeFragments(generator, cp, streamId)) {
         if (abortController.signal.aborted) {
-          this.log.debug(`Aborted stream ${streamId}, skipping fragment`, this.streamUrl);
           break;
         }
-        yield { data: fragmentBuffer, isLast: false };
+        count++;
+        this.log.debug(`Fragment #${count}, ${fragment.length}B`, this.streamUrl);
+        yield { data: fragment, isLast: false };
       }
-    } catch (error) {
-      this.log.error(`Recording stream error: ${error}`, this.streamUrl);
+    } catch (err) {
+      this.log.error(`Stream error: ${err}`, this.streamUrl);
       yield { data: Buffer.alloc(0), isLast: true };
     } finally {
       this.streamAbortControllers.delete(streamId);
     }
   }
 
+  /**
+   * Releases resources for closed stream.
+   */
   closeRecordingStream(streamId: number, reason?: HDSProtocolSpecificErrorReason): void {
-    this.log.info(`Recording stream closed for stream ID: ${streamId}, reason: ${reason}`, this.streamUrl);
+    if (!this.streamAbortControllers.has(streamId)) {
+      return;
+    }
+
+    this.log.info(`Stream ${streamId} closed, reason: ${reason}`, this.streamUrl);
     this.streamAbortControllers.get(streamId)?.abort();
     this.streamAbortControllers.delete(streamId);
 
-    const process = this.activeFFmpegProcesses.get(streamId);
-    if (process && !process.killed) {
-      setTimeout(() => {
-        if (!process.killed) {
-          process.kill('SIGTERM');
-        }
-      }, 250);
+    const proc = this.activeFFmpegProcesses.get(streamId);
+    if (proc && !proc.killed) {
+      proc.kill('SIGTERM');
     }
     this.activeFFmpegProcesses.delete(streamId);
   }
 
+  /**
+   * Initializes prebuffer pipeline using FFmpeg.
+   */
   async startPreBuffer(): Promise<void> {
     this.log.info(`Starting prebuffer for ${this.streamUrl}`);
     if (!this.preBuffer) {
@@ -186,9 +225,6 @@ export class RecordingDelegate implements CameraRecordingDelegate {
         '-fflags', 'nobuffer',
         '-flags', 'low_delay',
         '-max_delay', '0',
-        '-re',
-        '-f', 'mjpeg',
-        '-r', '25',
         '-i', this.streamUrl,
       ];
       this.preBuffer = new PreBuffer(ffmpegInput, this.streamUrl, this.videoProcessor, this.log);
@@ -196,96 +232,81 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     }
   }
 
-  async *handleFragmentsRequests(config: CameraRecordingConfiguration, streamId: number): AsyncGenerator<Buffer> {
-    if (!this.preBuffer) {
-      throw new Error('No video source configured');
-    }
+  /**
+   * Sets up FFmpeg to convert buffered data into fragmented MP4.
+   */
+  private async launchFragmentSession(config: CameraRecordingConfiguration, streamId: number): Promise<FFMpegFragmentedMP4Session> {
+    const input = await this.preBuffer!.getVideo(config.mediaContainerConfiguration.fragmentLength ?? PREBUFFER_LENGTH);
 
-    const input = await this.preBuffer.getVideo(config.mediaContainerConfiguration.fragmentLength ?? PREBUFFER_LENGTH);
-
-    const videoArgs = [
+    const args = [
+      '-map', '0:v:0',
       '-vcodec', 'libx264',
       '-pix_fmt', 'yuv420p',
-      '-color_range', 'mpeg',
+      '-profile:v', config.videoCodec.parameters.profile === H264Profile.HIGH ? 'high' : 'main',
+      '-level:v', config.videoCodec.parameters.level === H264Level.LEVEL4_0 ? '4.0' : '3.1',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
-      '-crf', '22',
-      '-r', '25',
-      '-g', '25',
-      '-keyint_min', '25',
+      '-b:v', '600k',
+      '-maxrate', '700k',
+      '-bufsize', '1400k',
+      '-g', GOP_SIZE.toString(),
+      '-keyint_min', GOP_SIZE.toString(),
       '-sc_threshold', '0',
       '-force_key_frames', 'expr:gte(t,n_forced*1)',
-      '-filter:v', 'scale=\'min(1280,iw)\':\'min(720,ih)\':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2',
-      '-an',
+      '-f', 'mp4',
+      '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
+      'pipe:1',
     ];
 
-    const session = await this.startFFMPegFragmetedMP4Session(this.videoProcessor, input, videoArgs);
-    const { cp, generator } = session;
+    const cp = spawn(this.videoProcessor, [...input, ...args], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+
+    if (cp.stderr) {
+      cp.stderr.on('data', d => {
+        const msg = d.toString();
+        if (msg.includes('moov') || msg.toLowerCase().includes('error')) {
+          this.log.warn(`[FFmpeg]: ${msg.trim()}`);
+        }
+      });
+    }
+
     this.activeFFmpegProcesses.set(streamId, cp);
 
-    let moofBuffer: Buffer | null = null;
+    return {
+      cp,
+      generator: parseFragmentedMP4(cp.stdout!),
+    };
+  }
+
+  /**
+   * Reads and assembles moof+mdat fragment pairs from ffmpeg.
+   */
+  private async *consumeFragments(
+    generator: AsyncGenerator<MP4Atom>,
+    cp: ChildProcess,
+    streamId: number,
+  ): AsyncGenerator<Buffer> {
+    let moof: Buffer | null = null;
     let pending: Buffer[] = [];
-    let isFirst = true;
 
     try {
-      for await (const box of generator) {
-        pending.push(box.header, box.data);
-        if (isFirst && box.type === 'moov') {
+      for await (const atom of generator) {
+        pending.push(atom.header, atom.data);
+        if (atom.type === 'moov') {
           yield Buffer.concat(pending);
           pending = [];
-          isFirst = false;
-        } else if (box.type === 'moof') {
-          moofBuffer = Buffer.concat([box.header, box.data]);
-        } else if (box.type === 'mdat' && moofBuffer) {
-          const fragment = Buffer.concat([moofBuffer, box.header, box.data]);
-          yield fragment;
-          moofBuffer = null;
+        } else if (atom.type === 'moof') {
+          moof = Buffer.concat([atom.header, atom.data]);
+        } else if (atom.type === 'mdat' && moof) {
+          yield Buffer.concat([moof, atom.header, atom.data]);
+          moof = null;
         }
       }
     } finally {
       if (!cp.killed) {
         cp.kill('SIGTERM');
+        await new Promise(resolve => cp.once('exit', resolve));
       }
       this.activeFFmpegProcesses.delete(streamId);
     }
-  }
-
-  private async startFFMPegFragmetedMP4Session(
-    ffmpegPath: string,
-    input: string[],
-    outputArgs: string[],
-  ): Promise<FFMpegFragmentedMP4Session> {
-    const args = ['-hide_banner', ...input,
-      '-f', 'mp4',
-      ...outputArgs,
-      '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
-      'pipe:1'];
-
-    const cp = spawn(ffmpegPath, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
-
-    cp.on('exit', (code, signal) => {
-      this.log.error(`[FFmpeg] exited with code ${code}, signal ${signal}`);
-    });
-
-    if (cp.stderr) {
-      cp.stderr.on('data', data => {
-        const msg = data.toString();
-        if (msg.includes('moov') || msg.toLowerCase().includes('error')) {
-          this.log.warn(`[FFmpeg stderr]: ${msg.trim()}`);
-        }
-      });
-    }
-
-    async function* generator() {
-      while (true) {
-        const header = await readLength(cp.stdout!, 8);
-        const length = header.readInt32BE(0) - 8;
-        const type = header.slice(4).toString();
-        const data = await readLength(cp.stdout!, length);
-        yield { header, length, type, data };
-      }
-    }
-
-    return { cp, generator: generator() };
   }
 }
