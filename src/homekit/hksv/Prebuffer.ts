@@ -58,7 +58,6 @@ export class PreBuffer {
     }
 
     const vcodec = [
-      '-f', 'mjpeg',
       '-vcodec', 'libx264',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
@@ -85,6 +84,8 @@ export class PreBuffer {
           }
           this.prebufferFmp4.push({ atom, time: now });
         }
+
+        // Purge stale frames
         while (this.prebufferFmp4.length && this.prebufferFmp4[0].time < now - defaultPrebufferDuration) {
           this.prebufferFmp4.shift();
         }
@@ -103,7 +104,11 @@ export class PreBuffer {
 
     const debug = false;
     const stdioValue: StdioPipe | StdioNull = debug ? 'pipe' : 'ignore';
-    const cp = spawn(this.ffmpegPath, [...this.ffmpegInput, ...ffmpegOutput], {
+    const ffmpegArgs = [...this.ffmpegInput, ...ffmpegOutput];
+
+    this.log.debug(`[PreBuffer] FFmpeg command: ${this.ffmpegPath} ${ffmpegArgs.join(' ')}`);
+
+    const cp = spawn(this.ffmpegPath, ffmpegArgs, {
       env: process.env,
       stdio: stdioValue,
     });
@@ -111,7 +116,7 @@ export class PreBuffer {
     if (cp.stderr) {
       cp.stderr.on('data', data => {
         const output = data.toString();
-        if (output.includes('error') || output.includes('Error')) {
+        if (output.toLowerCase().includes('error')) {
           this.log.error(`[PreBuffer] FFmpeg: ${output.trim()}`, this.cameraName);
         }
       });
@@ -140,14 +145,17 @@ export class PreBuffer {
     const server = new Server(socket => {
       server.close();
       const writeAtom = (atom: MP4Atom) => socket.write(Buffer.concat([atom.header, atom.data]));
+
       if (this.ftyp) {
         writeAtom(this.ftyp);
       }
       if (this.moov) {
         writeAtom(this.moov);
       }
+
       const now = Date.now();
       let needMoof = true;
+
       for (const prebuffer of this.prebufferFmp4) {
         if (prebuffer.time < now - requestedPrebuffer) {
           continue;
@@ -158,20 +166,23 @@ export class PreBuffer {
         needMoof = false;
         writeAtom(prebuffer.atom);
       }
+
       this.events.on('atom', writeAtom);
+
       const cleanup = () => {
         this.events.removeListener('atom', writeAtom);
         this.events.removeListener('killed', cleanup);
         socket.removeAllListeners();
         socket.destroy();
       };
+
       this.events.once('killed', cleanup);
       socket.once('end', cleanup);
       socket.once('close', cleanup);
       socket.once('error', cleanup);
     });
 
-    setTimeout(() => server.close(), 30000);
+    setTimeout(() => server.close(), 30000); // safety timeout
     const port = await listenServer(server, this.log);
 
     return ['-f', 'mp4', '-i', `tcp://127.0.0.1:${port}`];

@@ -57,20 +57,19 @@ export async function readLength(readable: Readable, length: number): Promise<Bu
   if (ret) {
     return ret;
   }
-
   return new Promise((resolve, reject) => {
-    const r = (): void => {
+    const r = () => {
       const data = readable.read(length);
       if (data) {
         cleanup();
         resolve(data);
       }
     };
-    const e = (): void => {
+    const e = () => {
       cleanup();
       reject(new Error(`stream ended during read for minimum ${length} bytes`));
     };
-    const cleanup = (): void => {
+    const cleanup = () => {
       readable.removeListener('readable', r);
       readable.removeListener('end', e);
     };
@@ -181,6 +180,8 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     this.log.info(`Starting prebuffer for ${this.streamUrl}`);
     if (!this.preBuffer) {
       const ffmpegInput = [
+        '-f', 'mjpeg',
+        '-r', '10',
         '-headers', `Authorization: Basic ${this.base64auth}\\r\\n`,
         '-i', this.streamUrl,
       ];
