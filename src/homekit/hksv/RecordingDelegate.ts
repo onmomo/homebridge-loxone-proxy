@@ -218,13 +218,12 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     this.log.info(`Starting prebuffer for ${this.streamUrl}`);
     if (!this.preBuffer) {
       const ffmpegInput = [
+        '-f', 'mjpeg',
+        '-r', '10',
+        '-re',
+        '-fflags', '+genpts+discardcorrupt',
+        '-timeout', '5000000',
         '-headers', `Authorization: Basic ${this.base64auth}\r\n`,
-        '-use_wallclock_as_timestamps', '1',
-        '-probesize', '32',
-        '-analyzeduration', '0',
-        '-fflags', 'nobuffer',
-        '-flags', 'low_delay',
-        '-max_delay', '0',
         '-i', this.streamUrl,
       ];
       this.preBuffer = new PreBuffer(ffmpegInput, this.streamUrl, this.videoProcessor, this.log);
@@ -239,7 +238,6 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     const input = await this.preBuffer!.getVideo(config.mediaContainerConfiguration.fragmentLength ?? PREBUFFER_LENGTH);
 
     const args = [
-      '-map', '0:v:0',
       '-vcodec', 'libx264',
       '-pix_fmt', 'yuv420p',
       '-profile:v', config.videoCodec.parameters.profile === H264Profile.HIGH ? 'high' : 'main',
@@ -249,13 +247,10 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       '-b:v', '600k',
       '-maxrate', '700k',
       '-bufsize', '1400k',
-      '-g', GOP_SIZE.toString(),
-      '-keyint_min', GOP_SIZE.toString(),
+      '-g', '30',
+      '-keyint_min', '15',
       '-sc_threshold', '0',
       '-force_key_frames', 'expr:gte(t,n_forced*1)',
-      '-f', 'mp4',
-      '-movflags', 'frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
-      'pipe:1',
     ];
 
     const cp = spawn(this.videoProcessor, [...input, ...args], { env, stdio: ['pipe', 'pipe', 'pipe'] });

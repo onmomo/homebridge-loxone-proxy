@@ -66,17 +66,10 @@ export class PreBuffer {
 
     const vcodec = [
       '-vcodec', 'libx264',
-      '-pix_fmt', 'yuv420p',
-      '-color_range', 'mpeg',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
-      '-crf', '22',
-      '-r', '25',
-      '-g', '25',
-      '-keyint_min', '25',
-      '-sc_threshold', '0',
-      '-force_key_frames', 'expr:gte(t,n_forced*1)',
-      '-filter:v', 'scale=\'min(1280,iw)\':\'min(720,ih)\':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-pix_fmt', 'yuv420p',
+      '-r', '10',
       '-an',
     ];
 
