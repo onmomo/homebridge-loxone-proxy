@@ -178,7 +178,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     this.log.info(`Starting prebuffer for ${this.streamUrl}`);
     if (!this.preBuffer) {
       const ffmpegInput = [
-        '-headers', `Authorization: Basic ${this.base64auth}\r\n`,
+        '-headers', `Authorization: Basic ${this.base64auth}\\r\\n`,
         '-use_wallclock_as_timestamps', '1',
         '-probesize', '32',
         '-analyzeduration', '0',
