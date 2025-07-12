@@ -130,12 +130,19 @@ export class IrrigationSystem extends BaseService {
 
       // Always attach handler (even for cached valves)
       valveService.getCharacteristic(Characteristic.Active).on('set', (value, callback) => {
+        const loxoneZoneId = zone.id + 1; // ✅ Fix: adjust for Loxone's select/1 = Zone 1
         this.platform.log.debug(
-          `[${this.device.name}] HomeKit toggled zone ${zone.id} (${rawName}) → ${value ? 'ON' : 'OFF'}`
+          `[${this.device.name}] HomeKit toggled zone ${zone.id} (${rawName}) → ${value ? 'ON' : 'OFF'}`,
         );
 
-        this.sendCommand(value === 1 ? `select/${zone.id}` : 'select/0');
-        valveService.updateCharacteristic(Characteristic.InUse, value);
+        if (value === 1) {
+          this.sendCommand(`select/${loxoneZoneId}`);
+          valveService.updateCharacteristic(Characteristic.InUse, 1);
+        } else {
+          this.sendCommand('select/0'); // OFF = 0
+          valveService.updateCharacteristic(Characteristic.InUse, 0);
+        }
+
         callback(null);
       });
 
