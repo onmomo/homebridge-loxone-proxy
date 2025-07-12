@@ -34,6 +34,7 @@ export class IrrigationSystem extends BaseService {
   /**
    * Handle incoming state updates from Loxone.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   updateService(message: { state: string; value: any }): void {
     const { Characteristic } = this.platform;
 
@@ -64,7 +65,7 @@ export class IrrigationSystem extends BaseService {
       }
 
       case 'currentZone': {
-        for (const [id, valve] of this.zoneValves.entries()) {
+        for (const valve of this.zoneValves.values()) {
           valve.updateCharacteristic(Characteristic.InUse, 0);
           valve.updateCharacteristic(Characteristic.Active, 0);
         }
@@ -84,7 +85,7 @@ export class IrrigationSystem extends BaseService {
           const activeValve = this.zoneValves.get(message.value);
           if (activeValve) {
             this.platform.log.debug(
-              `[${this.device.name}] Zone ${message.value + 1} is ACTIVE (Loxone index ${message.value})`
+              `[${this.device.name}] Zone ${message.value + 1} is ACTIVE (Loxone index ${message.value})`,
             );
             activeValve.updateCharacteristic(Characteristic.InUse, 1);
             activeValve.updateCharacteristic(Characteristic.Active, 1);
@@ -133,7 +134,7 @@ export class IrrigationSystem extends BaseService {
           const loxoneZoneId = zone.id + 1; // Fix: Loxone select/1 = Zone 1
 
           this.platform.log.debug(
-            `[${this.device.name}] HomeKit toggled zone ${zone.id} (${rawName}) → ${value ? 'ON' : 'OFF'}`
+            `[${this.device.name}] HomeKit toggled zone ${zone.id} (${rawName}) → ${value ? 'ON' : 'OFF'}`,
           );
 
           if (value === 1) {
