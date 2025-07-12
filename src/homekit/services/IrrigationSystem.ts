@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { BaseService } from './BaseService';
 import { Service } from 'homebridge';
 
@@ -26,7 +27,6 @@ export class IrrigationSystem extends BaseService {
     this.service.setCharacteristic(this.platform.Characteristic.Active, 0);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   updateService(message: { state: string; value: any }): void {
     const { Characteristic } = this.platform;
 
@@ -59,27 +59,28 @@ export class IrrigationSystem extends BaseService {
 
       case 'currentZone': {
         const now = Date.now();
+        let anyZoneActive = false;
 
         for (const [, valve] of this.zoneValves.entries()) {
           valve.updateCharacteristic(Characteristic.InUse, 0);
           valve.updateCharacteristic(Characteristic.Active, 0);
           valve.updateCharacteristic(Characteristic.RemainingDuration, 0);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           if ((valve as any).__zoneMeta) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (valve as any).__zoneMeta.startTime = null;
           }
         }
 
         if (message.value === -1) {
+          this.service!.updateCharacteristic(Characteristic.InUse, 0);
+          this.service!.updateCharacteristic(Characteristic.Active, 0);
           break;
         }
 
         if (message.value === 8) {
+          anyZoneActive = true;
           for (const valve of this.zoneValves.values()) {
             valve.updateCharacteristic(Characteristic.InUse, 1);
             valve.updateCharacteristic(Characteristic.Active, 1);
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const meta = (valve as any).__zoneMeta;
             if (meta) {
               meta.startTime = now;
@@ -88,9 +89,9 @@ export class IrrigationSystem extends BaseService {
         } else {
           const valve = this.zoneValves.get(message.value);
           if (valve) {
+            anyZoneActive = true;
             valve.updateCharacteristic(Characteristic.InUse, 1);
             valve.updateCharacteristic(Characteristic.Active, 1);
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const meta = (valve as any).__zoneMeta;
             if (meta) {
               meta.startTime = now;
@@ -98,6 +99,9 @@ export class IrrigationSystem extends BaseService {
             }
           }
         }
+
+        this.service!.updateCharacteristic(Characteristic.InUse, anyZoneActive ? 1 : 0);
+        this.service!.updateCharacteristic(Characteristic.Active, anyZoneActive ? 1 : 0);
         break;
       }
 
@@ -128,7 +132,6 @@ export class IrrigationSystem extends BaseService {
       valveService.setCharacteristic(Characteristic.SetDuration, zone.duration);
       valveService.setCharacteristic(Characteristic.RemainingDuration, 0);
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (valveService as any).__zoneMeta = {
         id: zone.id,
         duration: zone.duration,
@@ -148,6 +151,17 @@ export class IrrigationSystem extends BaseService {
           callback(null);
         });
 
+      valveService
+        .getCharacteristic(Characteristic.SetDuration)
+        .removeAllListeners('set')
+        .on('set', (value, callback) => {
+          const duration = typeof value === 'number' ? Math.max(0, Math.floor(value)) : 0;
+          valveService.setCharacteristic(Characteristic.SetDuration, duration);
+          (valveService as any).__zoneMeta.duration = duration;
+          this.sendCommand(`setDuration/${zone.id}=${duration}`);
+          callback(null);
+        });
+
       this.zoneValves.set(zone.id, valveService);
     });
   }
@@ -159,8 +173,9 @@ export class IrrigationSystem extends BaseService {
 
     this.durationUpdateInterval = setInterval(() => {
       const now = Date.now();
+      let systemActive = false;
+
       for (const valve of this.zoneValves.values()) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const meta = (valve as any).__zoneMeta;
         if (meta?.startTime) {
           const elapsed = Math.floor((now - meta.startTime) / 1000);
@@ -171,9 +186,14 @@ export class IrrigationSystem extends BaseService {
             meta.startTime = null;
             valve.updateCharacteristic(this.platform.Characteristic.InUse, 0);
             valve.updateCharacteristic(this.platform.Characteristic.Active, 0);
+          } else {
+            systemActive = true;
           }
         }
       }
+
+      this.service!.updateCharacteristic(this.platform.Characteristic.InUse, systemActive ? 1 : 0);
+      this.service!.updateCharacteristic(this.platform.Characteristic.Active, systemActive ? 1 : 0);
     }, 1000);
   }
 
