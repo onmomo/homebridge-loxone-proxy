@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { v4 as uuidv4 } from 'uuid';
 import * as LxCommunicator from 'lxcommunicator';
@@ -134,9 +135,6 @@ class LoxoneHandler {
       .then(() => this.socket.send('data/LoxAPP3.json'))
       .then((file: string) => {
         this.loxdata = JSON.parse(file);
-        return this.socket.send('jdev/sps/enablebinstatusupdate');
-      })
-      .then(() => {
         this.log.info('Connected to Miniserver');
         return true;
       })
@@ -145,6 +143,14 @@ class LoxoneHandler {
         this.socket.close();
         return false;
       });
+  }
+
+  /**
+   * Starts binary status updates from the Miniserver after all listeners are registered.
+   */
+  public startBinaryStatusUpdates(): void {
+    this.log.debug('[LoxoneHandler] Enabling binary status updates...');
+    this.socket.send('jdev/sps/enablebinstatusupdate');
   }
 
   /**
@@ -163,6 +169,8 @@ class LoxoneHandler {
       const success = await this.connect();
       if (!success) {
         this.reconnect();
+      } else {
+        this.startBinaryStatusUpdates();
       }
     };
 
