@@ -23,7 +23,7 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service = this.api.hap.Service;
   public readonly Characteristic: typeof Characteristic = this.api.hap.Characteristic;
   public readonly accessories: PlatformAccessory[] = []; // restored cached accessories
-  private mappedAccessories = new Set<string>(); // tracking of mapped UUIDs
+  public mappedAccessories = new Set<string>(); // tracking of mapped UUIDs
   private displayNameCount: Record<string, number> = {}; // for name uniqueness
 
   constructor(
@@ -98,6 +98,8 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
       try {
         const itemType = item.type;
 
+        this.log.debug(`[mapLoxoneItems] ${item.name} UUID: ${item.uuidAction}`);
+
         const isRoomExcluded =
           (RoomFilterType.toLowerCase() === 'exclusion' && RoomFilterList.includes(item.room.toLowerCase())) ||
           (RoomFilterType.toLowerCase() === 'inclusion' && !RoomFilterList.includes(item.room.toLowerCase()));
@@ -111,9 +113,6 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
             const itemFile = await import(`./loxone/items/${itemType}`);
             itemCache[itemType] = itemFile;
           }
-
-          const uuid = this.api.hap.uuid.generate(item.uuidAction);
-          this.mappedAccessories.add(uuid);
 
           const itemFile = itemCache[itemType];
           const constructorName = Object.keys(itemFile)[0];

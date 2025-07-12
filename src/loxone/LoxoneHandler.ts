@@ -135,6 +135,7 @@ class LoxoneHandler {
       .then(() => this.socket.send('data/LoxAPP3.json'))
       .then((file: string) => {
         this.loxdata = JSON.parse(file);
+        this.startBinaryStatusUpdates();
         this.log.info('Connected to Miniserver');
         return true;
       })
@@ -169,8 +170,6 @@ class LoxoneHandler {
       const success = await this.connect();
       if (!success) {
         this.reconnect();
-      } else {
-        this.startBinaryStatusUpdates();
       }
     };
 

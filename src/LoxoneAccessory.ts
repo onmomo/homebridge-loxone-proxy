@@ -35,6 +35,7 @@ export class LoxoneAccessory {
     this.configureServices(this.Accessory);
     this.setupListeners();
 
+    this.platform.mappedAccessories.add(this.Accessory.UUID);
     this.platform.AccessoryCount++;
   }
 
