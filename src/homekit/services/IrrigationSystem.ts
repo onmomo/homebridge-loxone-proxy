@@ -78,7 +78,7 @@ export class IrrigationSystem extends BaseService {
         } else {
           const activeValve = this.zoneValves.get(message.value);
           if (activeValve) {
-            this.platform.log.debug(`[${this.device.name}] Zone ${message.value} is active`);
+            this.platform.log.debug(`[${this.device.name}] Zone ${message.value + 1} is active`);
             activeValve.updateCharacteristic(Characteristic.InUse, 1);
             activeValve.updateCharacteristic(Characteristic.Active, 1);
           } else {
@@ -105,8 +105,8 @@ export class IrrigationSystem extends BaseService {
       const displayName = this.platform.sanitizeName(zone.name);
 
       const valveService =
-    this.accessory.getServiceById(Service.Valve, `zone-${zone.id}`) ||
-    this.accessory.addService(Service.Valve, displayName, `zone-${zone.id}`);
+        this.accessory.getServiceById(Service.Valve, `zone-${zone.id}`) ||
+        this.accessory.addService(Service.Valve, displayName, `zone-${zone.id}`);
 
       valveService.setCharacteristic(Characteristic.Name, displayName);
       valveService.setCharacteristic(Characteristic.ConfiguredName, displayName);
@@ -114,23 +114,21 @@ export class IrrigationSystem extends BaseService {
       valveService.setCharacteristic(Characteristic.Active, 0);
       valveService.setCharacteristic(Characteristic.InUse, 0);
 
-      // Register handler once per zone
-      if (!this.zoneValves.has(zone.id)) {
-        this.platform.log.info(`[${this.device.name}] Registering handler for zone ${zone.id}`);
+      // Always attach the handler
+      this.platform.log.info(`[${this.device.name}] Binding .on('set') for zone ${zone.id}`);
 
-        valveService.getCharacteristic(Characteristic.Active).on('set', (value, callback) => {
-          if (value === 1) {
-            this.platform.log.debug(`[${this.device.name}] Activating zone ${zone.id}`);
-            this.sendCommand(`select/${zone.id}`);
-            valveService.updateCharacteristic(Characteristic.InUse, 1);
-          } else {
-            this.platform.log.debug(`[${this.device.name}] Deactivating zone ${zone.id}`);
-            this.sendCommand('select/0');
-            valveService.updateCharacteristic(Characteristic.InUse, 0);
-          }
-          callback(null);
-        });
-      }
+      valveService.getCharacteristic(Characteristic.Active).on('set', (value, callback) => {
+        if (value === 1) {
+          this.platform.log.debug(`[${this.device.name}] Activating zone ${zone.id}`);
+          this.sendCommand(`select/${zone.id}`);
+          valveService.updateCharacteristic(Characteristic.InUse, 1);
+        } else {
+          this.platform.log.debug(`[${this.device.name}] Deactivating zone ${zone.id}`);
+          this.sendCommand('select/0');
+          valveService.updateCharacteristic(Characteristic.InUse, 0);
+        }
+        callback(null);
+      });
 
       this.zoneValves.set(zone.id, valveService);
 
