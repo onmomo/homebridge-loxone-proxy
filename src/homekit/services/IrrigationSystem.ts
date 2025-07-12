@@ -15,7 +15,7 @@ export class IrrigationSystem extends BaseService {
   private zoneValves: Map<number, Service> = new Map();
 
   /**
-   * Set up the main IrrigationSystem service (invisible in Home app but required).
+   * Set up the main IrrigationSystem service.
    */
   setupService(): void {
     this.service =
@@ -64,7 +64,7 @@ export class IrrigationSystem extends BaseService {
       }
 
       case 'currentZone': {
-        for (const valve of this.zoneValves.values()) {
+        for (const [id, valve] of this.zoneValves.entries()) {
           valve.updateCharacteristic(Characteristic.InUse, 0);
           valve.updateCharacteristic(Characteristic.Active, 0);
         }
@@ -83,7 +83,9 @@ export class IrrigationSystem extends BaseService {
         } else {
           const activeValve = this.zoneValves.get(message.value);
           if (activeValve) {
-            this.platform.log.debug(`[${this.device.name}] Zone ${message.value + 1} is ACTIVE (Loxone index ${message.value})`);
+            this.platform.log.debug(
+              `[${this.device.name}] Zone ${message.value + 1} is ACTIVE (Loxone index ${message.value})`
+            );
             activeValve.updateCharacteristic(Characteristic.InUse, 1);
             activeValve.updateCharacteristic(Characteristic.Active, 1);
           } else {
@@ -102,7 +104,6 @@ export class IrrigationSystem extends BaseService {
 
   /**
    * Create or update HomeKit Valve services dynamically for each irrigation zone.
-   * Always rebinds set handlers, even for cached services.
    */
   private setupZones(zones: ZoneDefinition[]): void {
     const { Characteristic, Service } = this.platform;
@@ -118,29 +119,27 @@ export class IrrigationSystem extends BaseService {
         this.accessory.getServiceById(Service.Valve, subtype) ||
         this.accessory.addService(Service.Valve, rawName, subtype);
 
-      // Set HomeKit-visible and HAP-compliant names
       valveService.setCharacteristic(Characteristic.Name, rawName);
       valveService.setCharacteristic(Characteristic.ConfiguredName, safeName);
       valveService.setCharacteristic(Characteristic.ValveType, Characteristic.ValveType.IRRIGATION);
       valveService.setCharacteristic(Characteristic.Active, 0);
       valveService.setCharacteristic(Characteristic.InUse, 0);
 
-      // Always rebind handler
+      // Always rebind handler for every zone
       valveService
         .getCharacteristic(Characteristic.Active)
         .removeAllListeners('set')
         .on('set', (value, callback) => {
-          const loxoneZoneId = zone.id + 1; // Fix: Loxone's select/1 = Zone 1
+          const loxoneZoneId = zone.id + 1; // Fix: Loxone select/1 = Zone 1
+
           this.platform.log.debug(
             `[${this.device.name}] HomeKit toggled zone ${zone.id} (${rawName}) → ${value ? 'ON' : 'OFF'}`
           );
 
           if (value === 1) {
             this.sendCommand(`select/${loxoneZoneId}`);
-            valveService.updateCharacteristic(Characteristic.InUse, 1);
           } else {
             this.sendCommand('select/0');
-            valveService.updateCharacteristic(Characteristic.InUse, 0);
           }
 
           callback(null);
