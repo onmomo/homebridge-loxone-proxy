@@ -65,7 +65,9 @@ export class IrrigationSystem extends BaseService {
       }
 
       case 'currentZone': {
-        // Reset all valves
+        const { Characteristic } = this.platform;
+
+        // Reset all zones
         for (const valve of this.zoneValves.values()) {
           valve.updateCharacteristic(Characteristic.InUse, 0);
           valve.updateCharacteristic(Characteristic.Active, 0);
@@ -85,11 +87,11 @@ export class IrrigationSystem extends BaseService {
         } else {
           const activeValve = this.zoneValves.get(message.value);
           if (activeValve) {
-            this.platform.log.debug(`[${this.device.name}] Zone ${message.value + 1} is ACTIVE`);
+            this.platform.log.debug(`[${this.device.name}] Zone ${message.value + 1} is ACTIVE (Loxone index ${message.value})`);
             activeValve.updateCharacteristic(Characteristic.InUse, 1);
             activeValve.updateCharacteristic(Characteristic.Active, 1);
           } else {
-            this.platform.log.warn(`[${this.device.name}] Unknown currentZone index: ${message.value}`);
+            this.platform.log.warn(`[${this.device.name}] Unknown currentZone index from Loxone: ${message.value}`);
           }
         }
         break;
@@ -128,7 +130,10 @@ export class IrrigationSystem extends BaseService {
 
       // Always attach handler (even for cached valves)
       valveService.getCharacteristic(Characteristic.Active).on('set', (value, callback) => {
-        this.platform.log.debug(`[${this.device.name}] Valve ${rawName} set to ${value}`);
+        this.platform.log.debug(
+          `[${this.device.name}] HomeKit toggled zone ${zone.id} (${rawName}) → ${value ? 'ON' : 'OFF'}`
+        );
+
         this.sendCommand(value === 1 ? `select/${zone.id}` : 'select/0');
         valveService.updateCharacteristic(Characteristic.InUse, value);
         callback(null);
@@ -142,7 +147,7 @@ export class IrrigationSystem extends BaseService {
    * Send a Loxone command using the platform handler.
    */
   private sendCommand(command: string): void {
-    this.platform.log.debug(`[${this.device.name}] Sending command: ${command}`);
+    this.platform.log.debug(`[${this.device.name}] Sending command to Loxone: ${command}`);
     this.platform.LoxoneHandler.sendCommand(this.device.uuidAction, command);
   }
 }
