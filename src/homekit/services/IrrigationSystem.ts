@@ -58,15 +58,32 @@ export class IrrigationSystem extends BaseService {
       }
 
       case 'currentZone': {
+        // Reset all zones first
         for (const valve of this.zoneValves.values()) {
           valve.updateCharacteristic(Characteristic.InUse, 0);
           valve.updateCharacteristic(Characteristic.Active, 0);
         }
 
-        const activeValve = this.zoneValves.get(message.value);
-        if (activeValve) {
-          activeValve.updateCharacteristic(Characteristic.InUse, 1);
-          activeValve.updateCharacteristic(Characteristic.Active, 1);
+        if (message.value === -1) {
+          this.platform.log.debug(`[${this.device.name}] All zones off`);
+          break;
+        }
+
+        if (message.value === 8) {
+          this.platform.log.debug(`[${this.device.name}] All zones active`);
+          for (const valve of this.zoneValves.values()) {
+            valve.updateCharacteristic(Characteristic.InUse, 1);
+            valve.updateCharacteristic(Characteristic.Active, 1);
+          }
+        } else {
+          const activeValve = this.zoneValves.get(message.value);
+          if (activeValve) {
+            this.platform.log.debug(`[${this.device.name}] Zone ${message.value} is active`);
+            activeValve.updateCharacteristic(Characteristic.InUse, 1);
+            activeValve.updateCharacteristic(Characteristic.Active, 1);
+          } else {
+            this.platform.log.warn(`[${this.device.name}] Unknown zone index: ${message.value}`);
+          }
         }
         break;
       }
@@ -87,23 +104,20 @@ export class IrrigationSystem extends BaseService {
     zones.forEach((zone) => {
       const displayName = zone.name;
 
-      // Get or add Valve service by zone ID
       const valveService =
         this.accessory.getServiceById(Service.Valve, `zone-${zone.id}`) ||
         this.accessory.addService(Service.Valve, displayName, `zone-${zone.id}`);
 
-      // Set basic characteristics
       valveService.setCharacteristic(Characteristic.Name, zone.name);
       valveService.setCharacteristic(Characteristic.ConfiguredName, displayName);
       valveService.setCharacteristic(Characteristic.ValveType, Characteristic.ValveType.IRRIGATION);
       valveService.setCharacteristic(Characteristic.Active, 0);
       valveService.setCharacteristic(Characteristic.InUse, 0);
 
-      // Ensure we only register the handler once
+      // Register handler once per zone
       if (!this.zoneValves.has(zone.id)) {
         this.platform.log.info(`[${this.device.name}] Registering handler for zone ${zone.id}`);
 
-        // Handle Active ON/OFF from HomeKit UI
         valveService.getCharacteristic(Characteristic.Active).on('set', (value, callback) => {
           if (value === 1) {
             this.platform.log.debug(`[${this.device.name}] Activating zone ${zone.id}`);
@@ -118,7 +132,6 @@ export class IrrigationSystem extends BaseService {
         });
       }
 
-      // Store reference to valve
       this.zoneValves.set(zone.id, valveService);
 
       this.platform.log.debug(`[${this.device.name}] Zone ${zone.id} (${zone.name}) registered`);
