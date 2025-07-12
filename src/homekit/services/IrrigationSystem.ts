@@ -34,7 +34,6 @@ export class IrrigationSystem extends BaseService {
   /**
    * Handle incoming state updates from Loxone.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   updateService(message: { state: string; value: any }): void {
     const { Characteristic } = this.platform;
 
@@ -65,9 +64,6 @@ export class IrrigationSystem extends BaseService {
       }
 
       case 'currentZone': {
-        const { Characteristic } = this.platform;
-
-        // Reset all zones
         for (const valve of this.zoneValves.values()) {
           valve.updateCharacteristic(Characteristic.InUse, 0);
           valve.updateCharacteristic(Characteristic.Active, 0);
@@ -106,6 +102,7 @@ export class IrrigationSystem extends BaseService {
 
   /**
    * Create or update HomeKit Valve services dynamically for each irrigation zone.
+   * Always rebinds set handlers, even for cached services.
    */
   private setupZones(zones: ZoneDefinition[]): void {
     const { Characteristic, Service } = this.platform;
@@ -128,23 +125,26 @@ export class IrrigationSystem extends BaseService {
       valveService.setCharacteristic(Characteristic.Active, 0);
       valveService.setCharacteristic(Characteristic.InUse, 0);
 
-      // Always attach handler (even for cached valves)
-      valveService.getCharacteristic(Characteristic.Active).on('set', (value, callback) => {
-        const loxoneZoneId = zone.id + 1; // ✅ Fix: adjust for Loxone's select/1 = Zone 1
-        this.platform.log.debug(
-          `[${this.device.name}] HomeKit toggled zone ${zone.id} (${rawName}) → ${value ? 'ON' : 'OFF'}`,
-        );
+      // Always rebind handler
+      valveService
+        .getCharacteristic(Characteristic.Active)
+        .removeAllListeners('set')
+        .on('set', (value, callback) => {
+          const loxoneZoneId = zone.id + 1; // Fix: Loxone's select/1 = Zone 1
+          this.platform.log.debug(
+            `[${this.device.name}] HomeKit toggled zone ${zone.id} (${rawName}) → ${value ? 'ON' : 'OFF'}`
+          );
 
-        if (value === 1) {
-          this.sendCommand(`select/${loxoneZoneId}`);
-          valveService.updateCharacteristic(Characteristic.InUse, 1);
-        } else {
-          this.sendCommand('select/0'); // OFF = 0
-          valveService.updateCharacteristic(Characteristic.InUse, 0);
-        }
+          if (value === 1) {
+            this.sendCommand(`select/${loxoneZoneId}`);
+            valveService.updateCharacteristic(Characteristic.InUse, 1);
+          } else {
+            this.sendCommand('select/0');
+            valveService.updateCharacteristic(Characteristic.InUse, 0);
+          }
 
-        callback(null);
-      });
+          callback(null);
+        });
 
       this.zoneValves.set(zone.id, valveService);
     });
