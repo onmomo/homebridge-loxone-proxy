@@ -44,7 +44,6 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
     await this.waitForLoxoneConfig();
     this.log.debug(`[LoxoneInit] Got Structure File; Last modified on ${this.LoxoneHandler.loxdata.lastModified}`);
     this.parseLoxoneConfig(this.LoxoneHandler.loxdata);
-    this.LoxoneHandler.startBinaryStatusUpdates(); // Start binary status updates after config is parsed
     this.log.info('[LoxoneInit] Loxone Platform initialized successfully');
   }
 
