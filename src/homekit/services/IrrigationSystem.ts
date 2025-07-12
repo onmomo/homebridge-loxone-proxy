@@ -8,15 +8,10 @@ interface ZoneDefinition {
   setByLogic?: boolean;
 }
 
-/**
- * HomeKit Irrigation System with dynamic Valve zones and Loxone command integration.
- */
 export class IrrigationSystem extends BaseService {
   private zoneValves: Map<number, Service> = new Map();
+  private durationUpdateInterval: NodeJS.Timeout | null = null;
 
-  /**
-   * Set up the main IrrigationSystem service.
-   */
   setupService(): void {
     this.service =
       this.accessory.getService(this.platform.Service.IrrigationSystem) ||
@@ -31,9 +26,6 @@ export class IrrigationSystem extends BaseService {
     this.service.setCharacteristic(this.platform.Characteristic.Active, 0);
   }
 
-  /**
-   * Handle incoming state updates from Loxone.
-   */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   updateService(message: { state: string; value: any }): void {
     const { Characteristic } = this.platform;
@@ -58,6 +50,7 @@ export class IrrigationSystem extends BaseService {
 
           this.platform.log.info(`[${this.device.name}] Setting up ${zones.length} zones`);
           this.setupZones(zones);
+          this.startRemainingDurationUpdater();
         } catch (err) {
           this.platform.log.warn(`[${this.device.name}] Invalid zone data: ${message.value}`);
         }
@@ -65,32 +58,44 @@ export class IrrigationSystem extends BaseService {
       }
 
       case 'currentZone': {
-        for (const valve of this.zoneValves.values()) {
+        const now = Date.now();
+
+        for (const [, valve] of this.zoneValves.entries()) {
           valve.updateCharacteristic(Characteristic.InUse, 0);
           valve.updateCharacteristic(Characteristic.Active, 0);
+          valve.updateCharacteristic(Characteristic.RemainingDuration, 0);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          if ((valve as any).__zoneMeta) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (valve as any).__zoneMeta.startTime = null;
+          }
         }
 
         if (message.value === -1) {
-          this.platform.log.debug(`[${this.device.name}] All zones OFF`);
           break;
         }
 
         if (message.value === 8) {
-          this.platform.log.debug(`[${this.device.name}] All zones ACTIVE`);
           for (const valve of this.zoneValves.values()) {
             valve.updateCharacteristic(Characteristic.InUse, 1);
             valve.updateCharacteristic(Characteristic.Active, 1);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const meta = (valve as any).__zoneMeta;
+            if (meta) {
+              meta.startTime = now;
+            }
           }
         } else {
-          const activeValve = this.zoneValves.get(message.value);
-          if (activeValve) {
-            this.platform.log.debug(
-              `[${this.device.name}] Zone ${message.value + 1} is ACTIVE (Loxone index ${message.value})`,
-            );
-            activeValve.updateCharacteristic(Characteristic.InUse, 1);
-            activeValve.updateCharacteristic(Characteristic.Active, 1);
-          } else {
-            this.platform.log.warn(`[${this.device.name}] Unknown currentZone index from Loxone: ${message.value}`);
+          const valve = this.zoneValves.get(message.value);
+          if (valve) {
+            valve.updateCharacteristic(Characteristic.InUse, 1);
+            valve.updateCharacteristic(Characteristic.Active, 1);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const meta = (valve as any).__zoneMeta;
+            if (meta) {
+              meta.startTime = now;
+              valve.updateCharacteristic(Characteristic.RemainingDuration, meta.duration);
+            }
           }
         }
         break;
@@ -103,9 +108,6 @@ export class IrrigationSystem extends BaseService {
     this.platform.log.debug(`[${this.device.name}] State update: ${message.state} = ${message.value}`);
   }
 
-  /**
-   * Create or update HomeKit Valve services dynamically for each irrigation zone.
-   */
   private setupZones(zones: ZoneDefinition[]): void {
     const { Characteristic, Service } = this.platform;
 
@@ -113,8 +115,6 @@ export class IrrigationSystem extends BaseService {
       const rawName = zone.name || `Zone #${zone.id + 1}`;
       const safeName = this.platform.sanitizeName(rawName);
       const subtype = `zone-${zone.id}`;
-
-      this.platform.log.debug(`[${this.device.name}] Registering zone ${zone.id}: "${rawName}" → "${safeName}"`);
 
       const valveService =
         this.accessory.getServiceById(Service.Valve, subtype) ||
@@ -125,24 +125,26 @@ export class IrrigationSystem extends BaseService {
       valveService.setCharacteristic(Characteristic.ValveType, Characteristic.ValveType.IRRIGATION);
       valveService.setCharacteristic(Characteristic.Active, 0);
       valveService.setCharacteristic(Characteristic.InUse, 0);
+      valveService.setCharacteristic(Characteristic.SetDuration, zone.duration);
+      valveService.setCharacteristic(Characteristic.RemainingDuration, 0);
 
-      // Always rebind handler for every zone
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (valveService as any).__zoneMeta = {
+        id: zone.id,
+        duration: zone.duration,
+        startTime: null,
+      };
+
       valveService
         .getCharacteristic(Characteristic.Active)
         .removeAllListeners('set')
         .on('set', (value, callback) => {
-          const loxoneZoneId = zone.id + 1; // Fix: Loxone select/1 = Zone 1
-
-          this.platform.log.debug(
-            `[${this.device.name}] HomeKit toggled zone ${zone.id} (${rawName}) → ${value ? 'ON' : 'OFF'}`,
-          );
-
+          const loxoneZoneId = zone.id + 1;
           if (value === 1) {
             this.sendCommand(`select/${loxoneZoneId}`);
           } else {
             this.sendCommand('select/0');
           }
-
           callback(null);
         });
 
@@ -150,9 +152,31 @@ export class IrrigationSystem extends BaseService {
     });
   }
 
-  /**
-   * Send a Loxone command using the platform handler.
-   */
+  private startRemainingDurationUpdater(): void {
+    if (this.durationUpdateInterval) {
+      return;
+    }
+
+    this.durationUpdateInterval = setInterval(() => {
+      const now = Date.now();
+      for (const valve of this.zoneValves.values()) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const meta = (valve as any).__zoneMeta;
+        if (meta?.startTime) {
+          const elapsed = Math.floor((now - meta.startTime) / 1000);
+          const remaining = Math.max(0, meta.duration - elapsed);
+          valve.updateCharacteristic(this.platform.Characteristic.RemainingDuration, remaining);
+
+          if (remaining === 0) {
+            meta.startTime = null;
+            valve.updateCharacteristic(this.platform.Characteristic.InUse, 0);
+            valve.updateCharacteristic(this.platform.Characteristic.Active, 0);
+          }
+        }
+      }
+    }, 1000);
+  }
+
   private sendCommand(command: string): void {
     this.platform.log.debug(`[${this.device.name}] Sending command to Loxone: ${command}`);
     this.platform.LoxoneHandler.sendCommand(this.device.uuidAction, command);
