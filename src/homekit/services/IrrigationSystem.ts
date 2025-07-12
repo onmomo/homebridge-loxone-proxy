@@ -102,13 +102,13 @@ export class IrrigationSystem extends BaseService {
     const { Characteristic, Service } = this.platform;
 
     zones.forEach((zone) => {
-      const displayName = zone.name;
+      const displayName = this.platform.sanitizeName(zone.name);
 
       const valveService =
-        this.accessory.getServiceById(Service.Valve, `zone-${zone.id}`) ||
-        this.accessory.addService(Service.Valve, displayName, `zone-${zone.id}`);
+    this.accessory.getServiceById(Service.Valve, `zone-${zone.id}`) ||
+    this.accessory.addService(Service.Valve, displayName, `zone-${zone.id}`);
 
-      valveService.setCharacteristic(Characteristic.Name, zone.name);
+      valveService.setCharacteristic(Characteristic.Name, displayName);
       valveService.setCharacteristic(Characteristic.ConfiguredName, displayName);
       valveService.setCharacteristic(Characteristic.ValveType, Characteristic.ValveType.IRRIGATION);
       valveService.setCharacteristic(Characteristic.Active, 0);
