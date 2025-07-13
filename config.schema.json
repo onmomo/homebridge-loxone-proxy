@@ -57,6 +57,11 @@
               "DoorBell",
               "MotionSensor"
             ]
+          },
+          "MotionTriggersDoorbell": {
+            "type": "boolean",
+            "title": "Use Motion to trigger Doorbell event",
+            "default": false
           }
         }
       },
@@ -225,10 +230,11 @@
       "title": "HomeKit Secure Video (HKSV)",
       "description": "Enable or disable HKSV recording features. Requires iCloud+ and a compatible HomeKit Hub.",
       "items": [
-        "enableHKSV"
+        "enableHKSV",
+        "Advanced.MotionTriggersDoorbell"
       ]
     },
-      {
+    {
       "type": "fieldset",
       "expandable": true,
       "title": "Advanced",

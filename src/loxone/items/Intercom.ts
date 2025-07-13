@@ -73,6 +73,7 @@ export class Intercom extends LoxoneAccessory {
       this.platform,
       this.Accessory!,
       this.camera,
+      { triggerDoorbell: () => (this.Service.PrimaryService as Doorbell).triggerDoorbell() },
     );
   }
 

@@ -25,15 +25,19 @@ export class Doorbell extends BaseService {
       .onGet(() => this.handleProgrammableSwitchEventGet());
   }
 
+  public triggerDoorbell(): void {
+    this.platform.log.info(`[${this.device.name}] 🔔 Doorbell event triggered`);
+    this.State.ProgrammableSwitchEvent = this.platform.Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS;
+    this.service?.updateCharacteristic(
+      this.platform.Characteristic.ProgrammableSwitchEvent,
+      this.State.ProgrammableSwitchEvent,
+    );
+  }
+
   updateService(message: { value: number }): void {
     this.platform.log.debug(`[${this.device.name}] Callback state update for Doorbell: ${message.value}`);
     if (message.value === 1) {
-      this.State.ProgrammableSwitchEvent = this.platform.Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS;
-      this.service?.updateCharacteristic(
-        this.platform.Characteristic.ProgrammableSwitchEvent,
-        this.State.ProgrammableSwitchEvent,
-      );
-      this.platform.log.debug(`[${this.device.name}] ProgrammableSwitchEvent updated in HomeKit`);
+      this.triggerDoorbell();
     }
   }
 

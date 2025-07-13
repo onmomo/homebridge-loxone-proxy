@@ -35,6 +35,7 @@ export class CameraMotionSensor extends BaseService {
     platform: LoxonePlatform,
     accessory: PlatformAccessory,
     camera: CameraService,
+    private readonly doorbellService?: { triggerDoorbell: () => void },
   ) {
     super(platform, accessory);
     this.camera = camera;
@@ -63,7 +64,9 @@ export class CameraMotionSensor extends BaseService {
     this.active = true;
 
     setInterval(async () => {
-      if (!this.active) return;
+      if (!this.active) {
+        return;
+      }
 
       const snapshot = await this.camera.getSnapshot();
       if (!snapshot) {
@@ -103,6 +106,10 @@ export class CameraMotionSensor extends BaseService {
       this.platform.log.info(`[${this.accessory.displayName}] 📸 Motion detected via snapshot`);
       this.state.MotionDetected = true;
       this.service?.updateCharacteristic(this.platform.Characteristic.MotionDetected, true);
+      if (this.platform.config?.Advanced?.MotionTriggersDoorbell) {
+        this.platform.log.info(`[${this.accessory.displayName}] 🔔 Triggering doorbell event due to motion`);
+        this.doorbellService?.triggerDoorbell();
+      }
     }
 
     this.lastTrigger = now;
