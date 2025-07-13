@@ -99,7 +99,7 @@ export class PreBuffer {
     const stdioValue: StdioPipe | StdioNull = debug ? 'pipe' : 'ignore';
     const ffmpegArgs = [...this.ffmpegInput, ...ffmpegOutput];
 
-    this.log.debug(`[PreBuffer] FFmpeg command: ${this.ffmpegPath} ${ffmpegArgs.join(' ')}`);
+    this.log.debug(`[${this.cameraName}] [PreBuffer] FFmpeg command: ${this.ffmpegPath} ${ffmpegArgs.join(' ')}`);
 
     const cp = spawn(this.ffmpegPath, ffmpegArgs, {
       env: process.env,
@@ -107,14 +107,14 @@ export class PreBuffer {
     });
 
     cp.on('exit', (code, signal) => {
-      this.log.error(`[PreBuffer] FFmpeg exited with code ${code}, signal ${signal}`, this.cameraName);
+      this.log.error(`[${this.cameraName}] [PreBuffer] FFmpeg exited with code ${code}, signal ${signal}`);
     });
 
     if (cp.stderr) {
       cp.stderr.on('data', data => {
         const output = data.toString();
         if (output.toLowerCase().includes('error')) {
-          this.log.error(`[PreBuffer] FFmpeg: ${output.trim()}`, this.cameraName);
+          this.log.error(`[${this.cameraName}] [PreBuffer] FFmpeg: ${output.trim()}`);
         }
       });
     }
@@ -129,7 +129,7 @@ export class PreBuffer {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     if (!this.moov) {
-      this.log.error(`[PreBuffer] Timeout: moov atom not available for camera ${this.cameraName}`);
+      this.log.error(`[${this.cameraName}] [PreBuffer] Timeout: moov atom not available`);
       throw new Error('moov atom not yet available');
     }
 

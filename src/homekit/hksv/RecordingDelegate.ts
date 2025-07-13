@@ -92,6 +92,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   private readonly videoProcessor: string;
   private readonly streamUrl: string;
   private readonly base64auth: string;
+  private readonly cameraName: string;
 
   private preBufferSession?: Mp4Session;
   private preBuffer?: PreBuffer;
@@ -103,12 +104,14 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     private readonly platform: LoxonePlatform,
     streamUrl: string,
     base64auth: string,
+    cameraName: string,
   ) {
     this.log = platform.log;
     this.hap = platform.api.hap;
     this.videoProcessor = 'ffmpeg';
     this.streamUrl = streamUrl;
     this.base64auth = base64auth;
+    this.cameraName = cameraName;
 
     platform.api.on(APIEvent.SHUTDOWN, () => {
       this.preBufferSession?.process?.kill();
@@ -120,20 +123,20 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   }
 
   updateRecordingActive(active: boolean): Promise<void> {
-    this.log.info(`Recording active status changed to: ${active}`, this.streamUrl);
+    this.log.info(`[${this.cameraName}] Recording active status changed to: ${active}`, this.streamUrl);
     return Promise.resolve();
   }
 
   updateRecordingConfiguration(config: CameraRecordingConfiguration | undefined): Promise<void> {
-    this.log.info('Recording configuration updated', this.streamUrl);
+    this.log.info(`[${this.cameraName}] Recording configuration updated`, this.streamUrl);
     this.currentRecordingConfiguration = config;
     return Promise.resolve();
   }
 
   async *handleRecordingStreamRequest(streamId: number): AsyncGenerator<RecordingPacket> {
-    this.log.info(`Recording stream request received for stream ID: ${streamId}`, this.streamUrl);
+    this.log.info(`[${this.cameraName}] Recording stream request received for stream ID: ${streamId}`, this.streamUrl);
     if (!this.currentRecordingConfiguration) {
-      this.log.error('No recording configuration available', this.streamUrl);
+      this.log.error(`[${this.cameraName}] No recording configuration available`, this.streamUrl);
       return;
     }
 
@@ -145,13 +148,13 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       const fragmentGenerator = this.handleFragmentsRequests(this.currentRecordingConfiguration, streamId);
       for await (const fragmentBuffer of fragmentGenerator) {
         if (abortController.signal.aborted) {
-          this.log.debug(`Aborted stream ${streamId}, skipping fragment`, this.streamUrl);
+          this.log.debug(`[${this.cameraName}] Aborted stream ${streamId}, skipping fragment`, this.streamUrl);
           break;
         }
         yield { data: fragmentBuffer, isLast: false };
       }
     } catch (error) {
-      this.log.error(`Recording stream error: ${error}`, this.streamUrl);
+      this.log.error(`[${this.cameraName}] Recording stream error: ${error}`, this.streamUrl);
       yield { data: Buffer.alloc(0), isLast: true };
     } finally {
       this.streamAbortControllers.delete(streamId);
@@ -159,7 +162,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   }
 
   closeRecordingStream(streamId: number, reason?: HDSProtocolSpecificErrorReason): void {
-    this.log.info(`Recording stream closed for stream ID: ${streamId}, reason: ${reason}`, this.streamUrl);
+    this.log.info(`[${this.cameraName}] Recording stream closed for stream ID: ${streamId}, reason: ${reason}`, this.streamUrl);
     this.streamAbortControllers.get(streamId)?.abort();
     this.streamAbortControllers.delete(streamId);
 
@@ -175,7 +178,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   }
 
   async startPreBuffer(): Promise<void> {
-    this.log.info(`Starting prebuffer for ${this.streamUrl}`);
+    this.log.info(`[${this.cameraName}] Starting prebuffer for ${this.streamUrl}`);
     if (!this.preBuffer) {
       const ffmpegInput = [
         '-headers', `Authorization: Basic ${this.base64auth}\\r\\n`,
@@ -263,14 +266,14 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     const cp = spawn(ffmpegPath, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
 
     cp.on('exit', (code, signal) => {
-      this.log.error(`[FFmpeg] exited with code ${code}, signal ${signal}`);
+      this.log.error(`[${this.cameraName}] [FFmpeg] exited with code ${code}, signal ${signal}`);
     });
 
     if (cp.stderr) {
       cp.stderr.on('data', data => {
         const msg = data.toString();
         if (msg.includes('moov') || msg.toLowerCase().includes('error')) {
-          this.log.warn(`[FFmpeg stderr]: ${msg.trim()}`);
+          this.log.warn(`[${this.cameraName}] [FFmpeg stderr]: ${msg.trim()}`);
         }
       });
     }

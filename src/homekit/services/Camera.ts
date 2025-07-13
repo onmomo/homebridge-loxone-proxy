@@ -33,7 +33,7 @@ export class CameraService {
    */
   private setupService(): void {
 
-    this.streamingDelegate = new streamingDelegate(this.platform, this.ip, this.base64auth);
+    this.streamingDelegate = new streamingDelegate(this.platform, this.ip, this.base64auth, this.accessory.displayName);
     this.accessory.configureController(this.streamingDelegate.controller);
   }
 
