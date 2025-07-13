@@ -99,7 +99,7 @@ export class PreBuffer {
     const stdioValue: StdioPipe | StdioNull = debug ? 'pipe' : 'ignore';
     const ffmpegArgs = [...this.ffmpegInput, ...ffmpegOutput];
 
-    this.log.debug(`[${this.cameraName}] [PreBuffer] FFmpeg command: ${this.ffmpegPath} ${ffmpegArgs.join(' ')}`);
+    this.log.debug(`[${this.cameraName}] [PreBuffer] Spawn FFmpeg: ${this.ffmpegPath} ${ffmpegArgs.join(' ')}`);
 
     const cp = spawn(this.ffmpegPath, ffmpegArgs, {
       env: process.env,
@@ -109,6 +109,22 @@ export class PreBuffer {
     cp.on('exit', (code, signal) => {
       this.log.error(`[${this.cameraName}] [PreBuffer] FFmpeg exited with code ${code}, signal ${signal}`);
     });
+
+    // Handle termination signals to kill FFmpeg process
+    const terminate = () => {
+      if (!this.released) {
+        this.released = true;
+        this.events.emit('killed');
+        try {
+          cp.kill('SIGKILL');
+        } catch (e) {
+          this.log.error(`[${this.cameraName}] [PreBuffer] Failed to kill FFmpeg: ${e}`);
+        }
+      }
+    };
+
+    process.once('SIGTERM', terminate);
+    process.once('SIGINT', terminate);
 
     if (cp.stderr) {
       cp.stderr.on('data', data => {
