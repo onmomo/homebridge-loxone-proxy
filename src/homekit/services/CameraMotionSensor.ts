@@ -115,11 +115,6 @@ export class CameraMotionSensor extends BaseService {
       this.state.MotionDetected = true;
       this.service?.updateCharacteristic(this.platform.Characteristic.MotionDetected, true);
 
-      if (this.platform.config?.Advanced?.MotionTriggersDoorbell) {
-        this.platform.log.info(`[${this.accessory.displayName}] 🔔 Triggering doorbell event due to motion`);
-        this.doorbellService?.triggerDoorbell();
-      }
-
       if (this.motionResetTimer) {
         clearTimeout(this.motionResetTimer);
       }
