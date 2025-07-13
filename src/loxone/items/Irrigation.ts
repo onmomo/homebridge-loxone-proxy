@@ -14,7 +14,6 @@ export class Irrigation extends LoxoneAccessory {
   configureServices(): void {
     // Define which Loxone states to track and which service they belong to
     this.ItemStates = {
-      [this.device.states.rainActive]: { service: 'PrimaryService', state: 'rainActive' },
       [this.device.states.zones]: { service: 'PrimaryService', state: 'zones' },
       [this.device.states.currentZone]: { service: 'PrimaryService', state: 'currentZone' },
     };

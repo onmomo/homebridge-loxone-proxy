@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { BaseService } from './BaseService';
-import { Service } from 'homebridge';
+import { Valve } from './Valve';
 
 interface ZoneDefinition {
   id: number;
@@ -10,9 +10,12 @@ interface ZoneDefinition {
 }
 
 export class IrrigationSystem extends BaseService {
-  private zoneValves: Map<number, Service> = new Map();
+  private zoneValves: Map<number, Valve> = new Map();
   private durationUpdateInterval: NodeJS.Timeout | null = null;
 
+  /**
+   * Sets up the HomeKit IrrigationSystem service as a container (not controlling logic).
+   */
   setupService(): void {
     this.service =
       this.accessory.getService(this.platform.Service.IrrigationSystem) ||
@@ -23,21 +26,14 @@ export class IrrigationSystem extends BaseService {
       this.platform.Characteristic.ProgramMode,
       this.platform.Characteristic.ProgramMode.NO_PROGRAM_SCHEDULED,
     );
-    this.service.setCharacteristic(this.platform.Characteristic.InUse, 0);
-    this.service.setCharacteristic(this.platform.Characteristic.Active, 0);
   }
 
+  /**
+   * Handles updates from Loxone, such as zone definitions or currently active zone.
+   * @param message - Message object containing state and value from Loxone
+   */
   updateService(message: { state: string; value: any }): void {
-    const { Characteristic } = this.platform;
-
     switch (message.state) {
-      case 'rainActive':
-        this.service!.updateCharacteristic(
-          Characteristic.Active,
-          message.value ? Characteristic.Active.INACTIVE : Characteristic.Active.ACTIVE,
-        );
-        break;
-
       case 'zones': {
         try {
           const zones: ZoneDefinition[] =
@@ -59,49 +55,11 @@ export class IrrigationSystem extends BaseService {
 
       case 'currentZone': {
         const now = Date.now();
-        let anyZoneActive = false;
+        const currentId = message.value;
 
-        for (const [, valve] of this.zoneValves.entries()) {
-          valve.updateCharacteristic(Characteristic.InUse, 0);
-          valve.updateCharacteristic(Characteristic.Active, 0);
-          valve.updateCharacteristic(Characteristic.RemainingDuration, 0);
-          if ((valve as any).__zoneMeta) {
-            (valve as any).__zoneMeta.startTime = null;
-          }
-        }
-
-        if (message.value === -1) {
-          this.service!.updateCharacteristic(Characteristic.InUse, 0);
-          this.service!.updateCharacteristic(Characteristic.Active, 0);
-          break;
-        }
-
-        if (message.value === 8) {
-          anyZoneActive = true;
-          for (const valve of this.zoneValves.values()) {
-            valve.updateCharacteristic(Characteristic.InUse, 1);
-            valve.updateCharacteristic(Characteristic.Active, 1);
-            const meta = (valve as any).__zoneMeta;
-            if (meta) {
-              meta.startTime = now;
-            }
-          }
-        } else {
-          const valve = this.zoneValves.get(message.value);
-          if (valve) {
-            anyZoneActive = true;
-            valve.updateCharacteristic(Characteristic.InUse, 1);
-            valve.updateCharacteristic(Characteristic.Active, 1);
-            const meta = (valve as any).__zoneMeta;
-            if (meta) {
-              meta.startTime = now;
-              valve.updateCharacteristic(Characteristic.RemainingDuration, meta.duration);
-            }
-          }
-        }
-
-        this.service!.updateCharacteristic(Characteristic.InUse, anyZoneActive ? 1 : 0);
-        this.service!.updateCharacteristic(Characteristic.Active, anyZoneActive ? 1 : 0);
+        this.zoneValves.forEach((valve) => {
+          valve.updateFromLoxone(currentId, now);
+        });
         break;
       }
 
@@ -112,60 +70,25 @@ export class IrrigationSystem extends BaseService {
     this.platform.log.debug(`[${this.device.name}] State update: ${message.state} = ${message.value}`);
   }
 
+  /**
+   * Instantiates Valve objects for each defined irrigation zone.
+   * @param zones - Array of zone definition objects
+   */
   private setupZones(zones: ZoneDefinition[]): void {
-    const { Characteristic, Service } = this.platform;
-
     zones.forEach((zone) => {
-      const rawName = zone.name || `Zone #${zone.id + 1}`;
-      const safeName = this.platform.sanitizeName(rawName);
-      const subtype = `zone-${zone.id}`;
-
-      const valveService =
-        this.accessory.getServiceById(Service.Valve, subtype) ||
-        this.accessory.addService(Service.Valve, rawName, subtype);
-
-      valveService.setCharacteristic(Characteristic.Name, rawName);
-      valveService.setCharacteristic(Characteristic.ConfiguredName, safeName);
-      valveService.setCharacteristic(Characteristic.ValveType, Characteristic.ValveType.IRRIGATION);
-      valveService.setCharacteristic(Characteristic.Active, 0);
-      valveService.setCharacteristic(Characteristic.InUse, 0);
-      valveService.setCharacteristic(Characteristic.SetDuration, zone.duration);
-      valveService.setCharacteristic(Characteristic.RemainingDuration, 0);
-
-      (valveService as any).__zoneMeta = {
-        id: zone.id,
-        duration: zone.duration,
-        startTime: null,
-      };
-
-      valveService
-        .getCharacteristic(Characteristic.Active)
-        .removeAllListeners('set')
-        .on('set', (value, callback) => {
-          const loxoneZoneId = zone.id + 1;
-          if (value === 1) {
-            this.sendCommand(`select/${loxoneZoneId}`);
-          } else {
-            this.sendCommand('select/0');
-          }
-          callback(null);
-        });
-
-      valveService
-        .getCharacteristic(Characteristic.SetDuration)
-        .removeAllListeners('set')
-        .on('set', (value, callback) => {
-          const duration = typeof value === 'number' ? Math.max(0, Math.floor(value)) : 0;
-          valveService.setCharacteristic(Characteristic.SetDuration, duration);
-          (valveService as any).__zoneMeta.duration = duration;
-          this.sendCommand(`setDuration/${zone.id}=${duration}`);
-          callback(null);
-        });
-
-      this.zoneValves.set(zone.id, valveService);
+      const valve = new Valve(
+        this.platform,
+        this.accessory,
+        zone,
+        (command) => this.sendCommand(command),
+      );
+      this.zoneValves.set(zone.id, valve);
     });
   }
 
+  /**
+   * Periodically updates RemainingDuration of all valves.
+   */
   private startRemainingDurationUpdater(): void {
     if (this.durationUpdateInterval) {
       return;
@@ -173,30 +96,14 @@ export class IrrigationSystem extends BaseService {
 
     this.durationUpdateInterval = setInterval(() => {
       const now = Date.now();
-      let systemActive = false;
-
-      for (const valve of this.zoneValves.values()) {
-        const meta = (valve as any).__zoneMeta;
-        if (meta?.startTime) {
-          const elapsed = Math.floor((now - meta.startTime) / 1000);
-          const remaining = Math.max(0, meta.duration - elapsed);
-          valve.updateCharacteristic(this.platform.Characteristic.RemainingDuration, remaining);
-
-          if (remaining === 0) {
-            meta.startTime = null;
-            valve.updateCharacteristic(this.platform.Characteristic.InUse, 0);
-            valve.updateCharacteristic(this.platform.Characteristic.Active, 0);
-          } else {
-            systemActive = true;
-          }
-        }
-      }
-
-      this.service!.updateCharacteristic(this.platform.Characteristic.InUse, systemActive ? 1 : 0);
-      this.service!.updateCharacteristic(this.platform.Characteristic.Active, systemActive ? 1 : 0);
+      this.zoneValves.forEach((valve) => valve.tick(now));
     }, 1000);
   }
 
+  /**
+   * Sends a command string to the associated Loxone device.
+   * @param command - The command to send (e.g., 'select/1')
+   */
   private sendCommand(command: string): void {
     this.platform.log.debug(`[${this.device.name}] Sending command to Loxone: ${command}`);
     this.platform.LoxoneHandler.sendCommand(this.device.uuidAction, command);
