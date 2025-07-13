@@ -30,6 +30,9 @@ export class LightControllerV2 extends LoxoneAccessory {
       [this.device.states.activeMoods]: { service: 'PrimaryService', state: 'activeMoods' },
     };
 
+    // Manually push cached zones ActiveMoods state to simulate an initial update
+    this.platform.LoxoneHandler.pushCachedState(this, this.device.states.activeMoods);
+
     this.registerMoodSwitches();
   }
 

@@ -149,7 +149,7 @@ class LoxoneHandler {
   /**
    * Starts binary status updates from the Miniserver after all listeners are registered.
    */
-  public startBinaryStatusUpdates(): void {
+  private startBinaryStatusUpdates(): void {
     this.log.debug('[LoxoneHandler] Enabling binary status updates...');
     this.socket.send('jdev/sps/enablebinstatusupdate');
   }
@@ -225,6 +225,38 @@ class LoxoneHandler {
    */
   public getLastCachedValue(uuid: string): string {
     return this.uuidCache[uuid];
+  }
+
+  /**
+ * Simulates a binary event from cache for a specific UUID.
+ * This allows triggering the accessory callback handler even if Loxone did not push the value.
+ *
+ * @param accessory - The LoxoneAccessory instance (must have ItemStates defined)
+ * @param uuid - The UUID of the state to simulate
+ */
+  public pushCachedState(accessory: { device: any; ItemStates: any; callBackHandler: (msg: any) => void }, uuid: string): void {
+    const value = this.getLastCachedValue(uuid);
+
+    if (value === undefined) {
+      this.log.debug(`[pushCachedState] No cached value found for UUID: ${uuid}`);
+      return;
+    }
+
+    const itemState = accessory.ItemStates?.[uuid];
+    if (!itemState) {
+      this.log.warn(`[pushCachedState] UUID not registered in ItemStates for device ${accessory.device?.name}`);
+      return;
+    }
+
+    const message = {
+      uuid,
+      state: itemState.state,
+      service: itemState.service,
+      value,
+    };
+
+    this.log.debug(`[pushCachedState] Pushing Cached state for ${accessory.device?.name} [${itemState.state}] = ${value}`);
+    accessory.callBackHandler(message);
   }
 }
 
