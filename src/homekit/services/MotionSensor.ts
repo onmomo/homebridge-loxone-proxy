@@ -36,7 +36,7 @@ export class MotionSensor extends BaseService {
   };
 
   handleMotionDetectedGet() {
-    this.platform.log.debug('Triggered GET MotionDetected');
+    this.platform.log.debug(`[${this.device.name}] Triggered GET MotionDetected`);
     return this.State.MotionDetected;
   }
 }
