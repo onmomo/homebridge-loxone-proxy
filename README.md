@@ -24,7 +24,7 @@ The following list displays all supported itemtypes supported by this plugin.
 |`Humidity` | HumiditySensor | Auto | InfoOnlyAnalog Item. Tries to map based on its format. Can be overridden with a mapping.
 |`Intercom` | Doorbell, Camera | Auto | Full HKSV support with prebuffered recording
 |`IntercomV2` | Doorbell, MotionSensor, Camera | Auto | "Use in userinterface" has to be enabled on the MotionSensor for it to be detected. Full HKSV support with prebuffered recording.
-| `Irrigation` | IrrigationSystem | Auto | Requires a miniserver reboot to initializes the zones.
+| `Irrigation` | IrrigationSystem | Auto
 |`IRoomControllerV2` | Thermostat | Auto
 |`Jalousie` | Window Covering | Auto
 |`Leak` | LeakSensor | Manual | InfoOnlyDigital Item. Requires a mapping.
