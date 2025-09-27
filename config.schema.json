@@ -8,12 +8,12 @@
     "type": "object",
     "properties": {
       "host": {
-        "title": "MiniServer hostname/IP Address",
+        "title": "MiniServer hostname/IP Address (without http/https)",
         "type": "string",
         "required": true
       },
       "port": {
-        "title": "MiniServer HTTP Port",
+        "title": "MiniServer Port",
         "type": "integer",
         "default": "80",
         "required": true
@@ -46,7 +46,7 @@
           }
         }
       },
-     "Advanced": {
+      "Advanced": {
         "type": "object",
         "title": "Advanced",
         "properties": {
@@ -57,9 +57,14 @@
               "DoorBell",
               "MotionSensor"
             ]
+          },
+          "MotionTriggersDoorbell": {
+            "type": "boolean",
+            "title": "Use Motion to trigger Doorbell event",
+            "default": false
           }
         }
-      }, 
+      },
       "Exclusions": {
         "type": "string",
         "title": "Excluded ItemTypes"
@@ -87,6 +92,10 @@
         "type": "object",
         "title": "Switch aliases",
         "properties": {
+          "Outlet": {
+            "title": "Outlet (Will map all SwitchItems starting with this alias to a HomeKit Outlet)",
+            "type": "string"
+          },
           "Lock": {
             "title": "Lock (Will map all SwitchItems starting with this alias to a HomeKit DoorLock)",
             "type": "string"
@@ -132,6 +141,11 @@
             "type": "string"
           }
         }
+      },
+      "enableHKSV": {
+        "type": "boolean",
+        "title": "Enable HomeKit Secure Video (HKSV)",
+        "default": false
       }
     }
   },
@@ -143,10 +157,7 @@
         {
           "type": "flex",
           "flex-flow": "row wrap",
-          "items": [
-            "host",
-            "port"
-          ]
+          "items": ["host", "port"]
         },
         {
           "type": "flex",
@@ -162,9 +173,7 @@
         {
           "type": "flex",
           "flex-flow": "row wrap",
-          "items": [
-            "TLS"
-          ]
+          "items": ["TLS"]
         }
       ]
     },
@@ -187,6 +196,7 @@
       "title": "SwitchItem Mappings",
       "description": "Map Switch items using an Alias",
       "items": [
+        "switchAlias.Outlet",
         "switchAlias.Lock",
         "switchAlias.ReverseLockSwitch"
       ]
@@ -211,6 +221,17 @@
         "InfoOnlyDigitalAlias.Motion",
         "InfoOnlyDigitalAlias.Smoke",
         "InfoOnlyDigitalAlias.Leak"
+      ]
+    },
+  
+    {
+      "type": "fieldset",
+      "expandable": true,
+      "title": "HomeKit Secure Video (HKSV)",
+      "description": "Enable or disable HKSV recording features. Requires iCloud+ and a compatible HomeKit Hub.",
+      "items": [
+        "enableHKSV",
+        "Advanced.MotionTriggersDoorbell"
       ]
     },
     {

@@ -1,4 +1,13 @@
-import { API, DynamicPlatformPlugin, Logger, PlatformAccessory, PlatformConfig, Service, Characteristic } from 'homebridge';
+import {
+  API,
+  DynamicPlatformPlugin,
+  Logger,
+  PlatformAccessory,
+  PlatformConfig,
+  Service,
+  Characteristic,
+} from 'homebridge';
+
 import { StructureFile, Controls, MSInfo, Control, Room, CatValue } from './loxone/StructureFile';
 import LoxoneHandler from './loxone/LoxoneHandler';
 
@@ -13,7 +22,9 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
   public LoxoneItems: Controls = {} as Controls;
   public readonly Service: typeof Service = this.api.hap.Service;
   public readonly Characteristic: typeof Characteristic = this.api.hap.Characteristic;
-  public readonly accessories: PlatformAccessory[] = []; // this is used to track restored cached accessories
+  public readonly accessories: PlatformAccessory[] = []; // restored cached accessories
+  public mappedAccessories = new Set<string>(); // tracking of mapped UUIDs
+  private displayNameCount: Record<string, number> = {}; // for name uniqueness
 
   constructor(
     public readonly log: Logger,
@@ -26,17 +37,18 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
   }
 
   /**
-   * Establishes a WebSocket connection to the Loxone Miniserver and retrieves the structure file.
+   * Initializes the Loxone system and starts accessory mapping
    */
   async LoxoneInit(): Promise<void> {
     this.LoxoneHandler = new LoxoneHandler(this);
     await this.waitForLoxoneConfig();
     this.log.debug(`[LoxoneInit] Got Structure File; Last modified on ${this.LoxoneHandler.loxdata.lastModified}`);
     this.parseLoxoneConfig(this.LoxoneHandler.loxdata);
+    this.log.info('[LoxoneInit] Loxone Platform initialized successfully');
   }
 
   /**
-   * Waits for the Loxone configuration to be retrieved.
+   * Waits until the structure file is received from Loxone
    */
   waitForLoxoneConfig(): Promise<void> {
     return new Promise<void>((resolve) => {
@@ -50,7 +62,7 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
   }
 
   /**
-   * Parses the Loxone Structure File and collects a list of rooms, categories, and items.
+   * Parses the structure file and begins item mapping
    */
   parseLoxoneConfig(config: StructureFile): void {
     this.msInfo = config.msInfo;
@@ -65,16 +77,17 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
       Item.cat = LoxoneCats[Item.cat]?.type || 'undefined';
     }
 
-    this.mapLoxoneItems(Object.values(this.LoxoneItems));
-    this.removeUnmappedAccessories();
+    this.mapLoxoneItems(Object.values(this.LoxoneItems)).then(() => {
+      this.removeUnmappedAccessories();
+    });
   }
 
   /**
-   * Maps all Loxone items to their corresponding HomeKit accessories.
+   * Maps all Loxone items to their HomeKit accessories
    */
   async mapLoxoneItems(items: Control[]): Promise<void> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const itemCache: { [key: string]: any } = {}; // Cache object to store imported item files
+    const itemCache: { [key: string]: any } = {};
 
     const ExcludedItemTypes = this.config.Exclusions?.split(',') ?? [];
     const RoomFilterList = this.config.roomfilter?.list?.split(',') ?? [];
@@ -84,18 +97,18 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
       try {
         const itemType = item.type;
 
-        const isRoomExluded =
+        this.log.debug(`[mapLoxoneItems] ${item.name} UUID: ${item.uuidAction}`);
+
+        const isRoomExcluded =
           (RoomFilterType.toLowerCase() === 'exclusion' && RoomFilterList.includes(item.room.toLowerCase())) ||
           (RoomFilterType.toLowerCase() === 'inclusion' && !RoomFilterList.includes(item.room.toLowerCase()));
 
-        if (isRoomExluded) { // is the Room Exluded?
-          this.log.debug(`[mapLoxoneItem][RoomExlusion] Skipping Excluded Room: ${item.name} in room ${item.room}`);
-
-        } else if (ExcludedItemTypes.includes(itemType)) { // Exclude ItemTypes on ExclusionList
-          this.log.debug(`[mapLoxoneItem][ItemTypeExlusion] Skipping Excluded ItemType: ${item.name} with type ${item.type}`);
-
-        } else { // Map Item
-          if (!itemCache[itemType]) {  // Check if the item file has already been imported
+        if (isRoomExcluded) {
+          this.log.debug(`[mapLoxoneItem][RoomExclusion] Skipping Excluded Room: ${item.name} in room ${item.room}`);
+        } else if (ExcludedItemTypes.includes(itemType)) {
+          this.log.debug(`[mapLoxoneItem][ItemTypeExclusion] Skipping Excluded ItemType: ${item.name} with type ${item.type}`);
+        } else {
+          if (!itemCache[itemType]) {
             const itemFile = await import(`./loxone/items/${itemType}`);
             itemCache[itemType] = itemFile;
           }
@@ -105,33 +118,65 @@ export class LoxonePlatform implements DynamicPlatformPlugin {
           new itemFile[constructorName](this, item);
         }
       } catch (error) {
-        //console.log(error);
-        this.log.debug(`[mapLoxoneItem] Skipping Unsupported ItemType: ${item.name} with type ${item.type}`);
+        this.log.debug(error instanceof Error ? error.message : String(error));
+        this.log.info(`[mapLoxoneItem] Skipping Unsupported ItemType: ${item.name} with type ${item.type}`);
       }
     }
   }
 
   /**
-   * Removes cached accessories that are no longer present in the Loxone system.
+   * Removes Homebridge-cached accessories that were not re-mapped during this session.
    */
   removeUnmappedAccessories(): void {
-    setTimeout(() => {
-      this.accessories.forEach((accessory: PlatformAccessory) => {
-        if (!accessory.context.mapped) {
-          this.log.debug('Remove accessory: ', accessory.displayName);
-          this.api.unregisterPlatformAccessories('homebridge-loxone-proxy', 'LoxonePlatform', [accessory]);
-        }
-      });
-    }, 5000); // Delay this function for 5 seconds. Wait for all Accessories to map.
+    const pluginName = 'homebridge-loxone-proxy';
+    const platformName = 'LoxonePlatform';
+
+    this.accessories.forEach((accessory: PlatformAccessory) => {
+      if (!this.mappedAccessories.has(accessory.UUID)) {
+        this.log.info('[RemoveAccessory] Removing unused accessory:', accessory.displayName);
+        this.api.unregisterPlatformAccessories(pluginName, platformName, [accessory]);
+      } else {
+        this.log.debug('[RemoveAccessory] Keeping mapped accessory:', accessory.displayName);
+      }
+    });
+
+    this.mappedAccessories.clear(); // Reset after cleanup
   }
 
   /**
-   * Called when Homebridge restores cached accessories from disk at startup.
-   * Sets up event handlers for characteristics and updates values.
+   * Called at Homebridge startup to restore cached accessories
    */
   configureAccessory(accessory: PlatformAccessory): void {
     this.log.debug('Loading accessory from cache:', accessory.displayName);
-    accessory.context.mapped = false; // To enable the removal of cached accessories removed from Loxone
     this.accessories.push(accessory);
+  }
+
+  /**
+   * Sanitizes names by stripping invalid characters and excess spaces
+   */
+  public sanitizeName(name: string): string {
+    return name
+      .replace(/[^a-zA-Z0-9\s']/g, '')
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+
+  /**
+   * Ensures the generated name is unique per room/item combo (adds _1, _2 if needed)
+   */
+  public generateUniqueName(room: string, base: string): string {
+    const sanitizedRoom = this.sanitizeName(room || 'Unknown');
+    const sanitizedBase = this.sanitizeName(base || 'Unnamed');
+    const fullBase = `${sanitizedRoom} ${sanitizedBase}`;
+    let finalName = fullBase;
+
+    if (this.displayNameCount[fullBase] !== undefined) {
+      this.displayNameCount[fullBase]++;
+      finalName = `${fullBase}_${this.displayNameCount[fullBase]}`;
+    } else {
+      this.displayNameCount[fullBase] = 0;
+    }
+
+    return finalName;
   }
 }

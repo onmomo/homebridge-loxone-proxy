@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { v4 as uuidv4 } from 'uuid';
 import * as LxCommunicator from 'lxcommunicator';
@@ -47,14 +48,14 @@ class LoxoneHandler {
     if (typeof this.socket === 'undefined') {
       const uuid = uuidv4();
 
-      const webSocketConfig = new WebSocketConfig(WebSocketConfig.protocol.WS,
+      // choose WS or WSS depending on TLS
+      const proto = this.tls ? WebSocketConfig.protocol.WSS : WebSocketConfig.protocol.WS;
+      const webSocketConfig = new WebSocketConfig(proto,
         uuid, 'homebridge', WebSocketConfig.permission.APP, false);
 
-      const handleAnyEvent = (uuid: string, message: string): void => {
+      const handleAnyEvent = (uuid: string, message: any): void => {
         if (Object.prototype.hasOwnProperty.call(this.uuidCallbacks, uuid)) {
-
-          // This fixes issues where the returned data from loxone does not contain an object with the defined structure.
-          // Idealy this should be fixed within LxCommunicator
+          // Fixes cases where returned data is not in expected structure
           if (typeof message === 'string') {
             if (message.includes('->')) {
               const parts = message.split('->');
@@ -62,15 +63,13 @@ class LoxoneHandler {
                 message = parts[1].trim();
               }
             }
-
             // eslint-disable-next-line @typescript-eslint/ban-ts-comment
             // @ts-ignore
             message = { uuid: uuid, value: message };
           }
-
           this.uuidCallbacks[uuid].forEach(callback => callback(message));
         }
-        this.uuidCache[uuid] = message; // store itementry in Cache.
+        this.uuidCache[uuid] = message; // store in cache
       };
 
       webSocketConfig.delegate = {
@@ -85,7 +84,6 @@ class LoxoneHandler {
         },
         socketOnConnectionClosed: (socket: any, code: string): void => {
           this.log.info('Socket closed ' + code);
-
           if (code !== LxCommunicator.SupportCode.WEBSOCKET_MANUAL_CLOSE) {
             this.reconnect();
           }
@@ -122,51 +120,63 @@ class LoxoneHandler {
 
   /**
    * Connects to the Loxone Miniserver.
+   * Allows TLS hostnames like 300-400-500-600.serial.dyndns.loxonecloud.com with custom port.
    * @private
    * @returns {Promise<boolean>} A promise that resolves to true if the connection is successful, false otherwise.
    */
-  private connect(): Promise<boolean> {
-    this.log.info('Trying to connect to Miniserver');
+  private async connect(): Promise<boolean> {
+    this.log.info(`Trying to connect to Miniserver at ${this.host}:${this.port} (TLS=${this.tls})`);
 
-    const protocol = this.tls ? 'https://' : 'http://';
+    let url: string;
+    if (this.tls) {
+      // assume host is already a valid TLS hostname; just prepend https://
+      url = `https://${this.host}`;
+      if (this.port && this.port !== 443) {
+        url += `:${this.port}`;
+      }
+    } else {
+      url = `http://${this.host}:${this.port}`;
+    }
 
-    return this.socket.open(protocol + this.host + ':' + this.port, this.username, this.password)
-      .then(() => this.socket.send('data/LoxAPP3.json'))
-      .then((file: string) => {
-        this.loxdata = JSON.parse(file);
-        return this.socket.send('jdev/sps/enablebinstatusupdate');
-      })
-      .then(() => {
-        this.log.info('Connected to Miniserver');
-        return true;
-      })
-      .catch(error => {
-        this.log.error('Connection failed: ' + error);
+    try {
+      await this.socket.open(url, this.username, this.password);
+      const file = await this.socket.send('data/LoxAPP3.json');
+      this.loxdata = JSON.parse(file);
+      this.startBinaryStatusUpdates();
+      this.log.info('Connected to Miniserver');
+      return true;
+    } catch (error) {
+      this.log.error('Connection failed: ' + error);
+      try {
         this.socket.close();
-        return false;
-      });
+      } catch { /* empty */ }
+      return false;
+    }
+  }
+
+  /**
+   * Starts binary status updates from the Miniserver after all listeners are registered.
+   */
+  private startBinaryStatusUpdates(): void {
+    this.log.debug('[LoxoneHandler] Enabling binary status updates...');
+    this.socket.send('jdev/sps/enablebinstatusupdate');
   }
 
   /**
    * Handles the reconnection to the Loxone Miniserver.
    * @private
    */
-  private reconnect(): void {
-    this.log.info('Reconnecting in 10 seconds...');
-
-    const delay = (ms: number): Promise<void> => {
-      return new Promise(resolve => setTimeout(resolve, ms));
-    };
-
-    const runTimer = async (): Promise<void> => {
-      await delay(10000);
+  private reconnect(attempt = 0): void {
+    const delay = Math.min(10000 * (attempt + 1), 60000); // up to 1 min
+    this.log.info(`Reconnecting in ${delay / 1000}s...`);
+    setTimeout(async () => {
       const success = await this.connect();
-      if (!success) {
-        this.reconnect();
+      if (!success && attempt < 10) {
+        this.reconnect(attempt + 1);
+      } else if (!success) {
+        this.log.error('Max reconnect attempts reached');
       }
-    };
-
-    runTimer();
+    }, delay);
   }
 
   /**
@@ -182,7 +192,7 @@ class LoxoneHandler {
     }
 
     if (uuid in this.uuidCache) {
-      this.uuidCallbacks[uuid].forEach(callback => callback(this.uuidCache[uuid]));
+      this.uuidCallbacks[uuid].forEach(cb => cb(this.uuidCache[uuid]));
     }
   }
 
@@ -191,8 +201,9 @@ class LoxoneHandler {
    * @param {string} uuid - The UUID of the device.
    * @param {string} action - The action to be performed.
    */
-  public sendCommand(uuid: string, action: string): void {
-    this.socket.send(`jdev/sps/io/${uuid}/${action}`, 2);
+  public sendCommand(uuid: string, action: string): Promise<any> {
+    return this.socket.send(`jdev/sps/io/${uuid}/${action}`, 2)
+      .catch(err => this.log.error(`sendCommand failed: ${err}`));
   }
 
   /**
@@ -200,15 +211,7 @@ class LoxoneHandler {
    * @param {string} uuid - The UUID of the device.
    */
   public getsecuredDetails(uuid: string): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      this.socket.send(`jdev/sps/io/${uuid}/securedDetails`)
-        .then((file: string) => {
-          resolve(file);
-        })
-        .catch((error: any) => {
-          reject(error);
-        });
-    });
+    return this.socket.send(`jdev/sps/io/${uuid}/securedDetails`);
   }
 
   /**
@@ -218,6 +221,38 @@ class LoxoneHandler {
    */
   public getLastCachedValue(uuid: string): string {
     return this.uuidCache[uuid];
+  }
+
+  /**
+   * Simulates a binary event from cache for a specific UUID.
+   * This allows triggering the accessory callback handler even if Loxone did not push the value.
+   *
+   * @param accessory - The LoxoneAccessory instance (must have ItemStates defined)
+   * @param uuid - The UUID of the state to simulate
+   */
+  public pushCachedState(accessory: { device: any; ItemStates: any; callBackHandler: (msg: any) => void }, uuid: string): void {
+    const value = this.getLastCachedValue(uuid);
+
+    if (value === undefined) {
+      this.log.debug(`[pushCachedState] No cached value found for UUID: ${uuid}`);
+      return;
+    }
+
+    const itemState = accessory.ItemStates?.[uuid];
+    if (!itemState) {
+      this.log.warn(`[pushCachedState] UUID not registered in ItemStates for device ${accessory.device?.name}`);
+      return;
+    }
+
+    const message = {
+      uuid,
+      state: itemState.state,
+      service: itemState.service,
+      value,
+    };
+
+    this.log.debug(`[pushCachedState] Pushing Cached state for ${accessory.device?.name} [${itemState.state}] = ${value}`);
+    accessory.callBackHandler(message);
   }
 }
 

@@ -59,35 +59,34 @@ import { RecordingDelegate } from './RecordingDelegate';
       socket?: Socket;
   };
 
-/*
-  interface SampleRateEntry {
-      type: AudioRecordingCodecType;
-      bitrateMode: number;
-      samplerate: AudioRecordingSamplerate[];
-      audioChannels: number;
-  }
-  */
-
 export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreamingDelegate {
   public readonly controller: CameraController;
-  public readonly recordingDelegate: CameraRecordingDelegate;
+  public readonly recordingDelegate: CameraRecordingDelegate | undefined;
   private readonly streamUrl;
   private readonly ip;
   private readonly base64auth;
+  private readonly cameraName: string;
 
   private pendingSessions: { [index: string]: SessionInfo } = {};
   private ongoingSessions: { [index: string]: ActiveSession } = {};
+
+  private cachedSnapshot: Buffer | null = null;
+  private cachedAt = 0;
+  private readonly cacheTtlMs = 5000;
 
   //private readonly camera;
   private readonly hap: HAP;
   constructor(
       private readonly platform: LoxonePlatform,
       streamUrl: string,
-      base64auth?: string,
+      base64auth: string,
+      cameraName: string,
   ) {
     //this.camera = camera;
     this.hap = this.platform.api.hap;
     this.streamUrl = streamUrl;
+    this.base64auth = base64auth;
+    this.cameraName = cameraName;
 
     // Extract the IP address using a regular expression
     const ipAddressRegex = /http:\/\/([\d.]+)/;
@@ -96,12 +95,16 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
       this.ip = match[1];
     }
 
-    // Get authentication from constructor (V1) or use miniserver credentials (V2)
-    this.base64auth = base64auth ||
-      Buffer.from(`${this.platform.config.username}:${this.platform.config.password}`, 'utf8').toString('base64');
+    const enableHKSV = this.platform.config.enableHKSV ?? false;
 
+    if (enableHKSV) {
+      this.recordingDelegate = new RecordingDelegate(this.platform, this.streamUrl, this.base64auth, this.cameraName);
+      this.platform.log.info(`[${this.cameraName}] HKSV is Activated for this configuration.`);
+    } else {
+      this.recordingDelegate = undefined;
+      this.platform.log.info(`[${this.cameraName}] HKSV is Disabled for this configuration.`);
+    }
 
-    this.recordingDelegate = new RecordingDelegate(this.platform, this.streamUrl);
 
     const resolutions: Resolution[] = [
       [320, 180, 30],
@@ -177,10 +180,14 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
       cameraStreamCount: 5,
       delegate: this,
       streamingOptions: streamingOptions,
-      recording: {
-        options: recordingOptions,
-        delegate: this.recordingDelegate,
-      },
+      ...(this.recordingDelegate
+        ? {
+          recording: {
+            options: recordingOptions,
+            delegate: this.recordingDelegate,
+          },
+        }
+        : {}),
     };
 
     this.controller = new this.hap.CameraController(options);
@@ -197,16 +204,14 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
       try {
         session.socket?.close();
       } catch (error) {
-        this.platform.log.error(`Error occurred closing socket: ${error}`, this.ip, 'Homebridge');
+        this.platform.log.error(`[${this.cameraName}] Error occurred closing socket: ${error}`);
       }
 
       try {
         session.mainProcess?.stop();
       } catch (error) {
         this.platform.log.error(
-          `Error occurred terminating main FFmpeg process: ${error}`,
-          this.ip,
-          'Homebridge',
+          `[${this.cameraName}] Error occurred terminating main FFmpeg process: ${error}`,
         );
       }
 
@@ -214,15 +219,13 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
         session.returnProcess?.stop();
       } catch (error) {
         this.platform.log.error(
-          `Error occurred terminating two-way FFmpeg process: ${error}`,
-          this.ip,
-          'Homebridge',
+          `[${this.cameraName}] Error occurred terminating two-way FFmpeg process: ${error}`,
         );
       }
 
       delete this.ongoingSessions[sessionId];
 
-      this.platform.log.info('Stopped video stream.', this.ip);
+      this.platform.log.info(`[${this.cameraName}] Stopped video stream.`);
     }
   }
 
@@ -230,12 +233,34 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
     this.controller.forceStopStreamingSession(sessionId);
   }
 
+  /** Public snapshot method with internal caching */
+  public async getSnapshot(): Promise<Buffer | null> {
+    const now = Date.now();
+
+    if (this.cachedSnapshot && now - this.cachedAt < this.cacheTtlMs) {
+      this.platform.log.debug(`[${this.cameraName}] Snapshot cache hit`);
+      return this.cachedSnapshot;
+    }
+
+    return new Promise((resolve) => {
+      this.handleSnapshotRequest({ width: 640, height: 360 }, (err, buffer) => {
+        if (err || !buffer) {
+          this.platform.log.warn(`[${this.cameraName}] Snapshot request failed`);
+          return resolve(null);
+        }
+
+        this.cachedSnapshot = buffer;
+        this.cachedAt = Date.now();
+        resolve(buffer);
+      });
+    });
+  }
+
   async handleSnapshotRequest(
     request: SnapshotRequest,
     callback: SnapshotRequestCallback,
   ) {
-
-    this.platform.log.debug(`Snapshot requested: ${request.width} x ${request.height}`, this.ip);
+    this.platform.log.debug(`[${this.cameraName}] Snapshot requested: ${request.width} x ${request.height}`);
 
     // Spawn an ffmpeg process to capture a snapshot from the camera
     const ffmpeg = spawn('ffmpeg', [
@@ -243,9 +268,11 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
       '-headers', `Authorization: Basic ${this.base64auth}\r\n`,
       '-i', `${this.streamUrl}`,
       '-frames:v', '1',
-      '-loglevel', 'info',
+      '-update', '1',                      // Ensures only one frame is written
+      '-loglevel', 'error',
       '-f', 'image2',
-      '-',
+      '-vcodec', 'mjpeg',                 // Explicit JPEG output
+      '-',                                // Output to stdout
     ],
     { env: process.env });
 
@@ -254,21 +281,34 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
     // Collect the snapshot data from ffmpeg's stdout
     ffmpeg.stdout.on('data', data => snapshotBuffers.push(data));
 
+    // Log ffmpeg's stderr for diagnostics
     ffmpeg.stderr.on('data', data => {
-      this.platform.log.info('SNAPSHOT: ' + String(data));
+      const line = data.toString();
+      if (/error|failed|unable|not found/i.test(line)) {
+        this.platform.log.error(`[${this.cameraName}] Snapshot error: ${line.trim()}`);
+      } else {
+        //this.platform.log.debug(`[${this.cameraName}] Snapshot stderr: ${line.trim()}`);
+      }
     });
 
+    // Handle process exit
     ffmpeg.on('exit', (code, signal) => {
       if (signal) {
-        this.platform.log.debug('Snapshot process was killed with signal: ' + signal);
-        callback(new Error('killed with signal ' + signal));
+        this.platform.log.debug(`[${this.cameraName}] Snapshot process was killed with signal: ${signal}`);
+        callback(new Error('Snapshot process was killed with signal: ' + signal));
       } else if (code === 0) {
-        this.platform.log.debug(`Successfully captured snapshot at ${request.width}x${request.height}`);
+        this.platform.log.debug(`[${this.cameraName}] Successfully captured snapshot at ${request.width}x${request.height}`);
         callback(undefined, Buffer.concat(snapshotBuffers));
       } else {
-        this.platform.log.debug('Snapshot process exited with code ' + code);
+        this.platform.log.error(`[${this.cameraName}] Snapshot process exited with code ${code}`);
         callback(new Error('Snapshot process exited with code ' + code));
       }
+    });
+
+    // Handle unexpected errors
+    ffmpeg.on('error', (error) => {
+      this.platform.log.error(`[${this.cameraName}] Error while capturing snapshot: ${error.message}`);
+      callback(error);
     });
   }
 
@@ -329,9 +369,8 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
     switch (request.type) {
       case this.hap.StreamRequestTypes.START: {
         this.platform.log.debug(
-          `Start stream requested:
+          `[${this.cameraName}] Start stream requested:
           ${request.video.width}x${request.video.height}, ${request.video.fps} fps, ${request.video.max_bit_rate} kbps`,
-          this.ip,
         );
 
         await this.startStream(request, callback);
@@ -340,9 +379,8 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
 
       case this.hap.StreamRequestTypes.RECONFIGURE: {
         this.platform.log.debug(
-          `Reconfigure stream requested:
+          `[${this.cameraName}] Reconfigure stream requested:
           ${request.video.width}x${request.video.height}, ${request.video.fps} fps, ${request.video.max_bit_rate} kbps (Ignored)`,
-          this.ip,
         );
 
         callback();
@@ -350,7 +388,7 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
       }
 
       case this.hap.StreamRequestTypes.STOP: {
-        this.platform.log.debug('Stop stream requested', this.ip);
+        this.platform.log.debug(`[${this.cameraName}] Stop stream requested`);
 
         this.stopStream(request.sessionID);
         callback();
@@ -363,7 +401,7 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
     const sessionInfo = this.pendingSessions[request.sessionID];
 
     if (!sessionInfo) {
-      this.platform.log.error('Error finding session information.', this.ip);
+      this.platform.log.error(`[${this.cameraName}] Error finding session information.`);
       callback(new Error('Error finding session information'));
     }
 
@@ -446,7 +484,7 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
     activeSession.socket = createSocket(sessionInfo.addressVersion === 'ipv6' ? 'udp6' : 'udp4');
 
     activeSession.socket.on('error', (err: Error) => {
-      this.platform.log.error('Socket error: ' + err.message, this.ip);
+      this.platform.log.error(`[${this.cameraName}] Socket error: ${err.message}`);
       this.stopStream(request.sessionID);
     });
 
@@ -455,7 +493,7 @@ export class streamingDelegate implements CameraStreamingDelegate, FfmpegStreami
         clearTimeout(activeSession.timeout);
       }
       activeSession.timeout = setTimeout(() => {
-        this.platform.log.info('Device appears to be inactive. Stopping stream.', this.ip);
+        this.platform.log.info(`[${this.cameraName}] Device appears to be inactive. Stopping stream.`);
         this.controller.forceStopStreamingSession(request.sessionID);
         this.stopStream(request.sessionID);
       }, request.video.rtcp_interval * 5 * 1000);
