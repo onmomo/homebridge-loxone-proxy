@@ -8,12 +8,12 @@
     "type": "object",
     "properties": {
       "host": {
-        "title": "MiniServer hostname/IP Address",
+        "title": "MiniServer hostname/IP Address (without http/https)",
         "type": "string",
         "required": true
       },
       "port": {
-        "title": "MiniServer HTTP Port",
+        "title": "MiniServer Port",
         "type": "integer",
         "default": "80",
         "required": true
